@@ -1,0 +1,135 @@
+# ============================================================
+# LLM Character Operation Project
+# Python + IntelliJ IDEA/PyCharm + local .venv
+# ============================================================
+
+# ----------------------------
+# Python virtual environments
+# ----------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ----------------------------
+# Python cache / bytecode
+# ----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ----------------------------
+# Packaging / build artifacts
+# ----------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ----------------------------
+# IntelliJ IDEA / PyCharm
+# ----------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# ----------------------------
+# Jupyter
+# ----------------------------
+.ipynb_checkpoints/
+
+# ----------------------------
+# Project-local runtime state
+# ----------------------------
+.local/
+results/
+logs/
+tmp/
+temp/
+
+# ----------------------------
+# Experiment / training outputs
+# ----------------------------
+checkpoints/
+outputs/
+runs/
+wandb/
+tensorboard/
+lightning_logs/
+
+# ----------------------------
+# Local model files
+# Keep large downloaded weights out of Git.
+# ----------------------------
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.onnx
+
+# ----------------------------
+# Hugging Face / ML caches
+# Only relevant if a cache directory is placed inside the repo.
+# ----------------------------
+.cache/
+huggingface/
+hf_cache/
+
+# ----------------------------
+# Dataset artifacts generated locally
+# Keep source code/configs tracked; ignore generated data.
+# ----------------------------
+data/generated/
+data/splits/
+data/cache/
+
+# ----------------------------
+# Local environment / secrets
+# ----------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ----------------------------
+# Logs / profiler / debug output
+# ----------------------------
+*.log
+*.trace
+*.prof
+*.pstats
+
+# ----------------------------
+# OS files
+# ----------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ----------------------------
+# Editor swap / backup files
+# ----------------------------
+*.swp
+*.swo
+*~
+*.bak
+
+# ----------------------------
+# Windows-specific junk
+# ----------------------------
+$RECYCLE.BIN/
+System Volume Information/
