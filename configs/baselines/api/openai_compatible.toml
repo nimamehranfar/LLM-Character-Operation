@@ -1,0 +1,25 @@
+# Hosted zero-shot baseline for models that do not fit locally.
+# Pass --base-url and --model on the command line; credentials are read from the environment.
+[api]
+base_url = ""
+model = ""
+api_key_env = "BASELINE_API_KEY"
+require_api_key = true
+temperature = 0.0
+retries = 5
+retry_seconds = 2.0
+timeout_seconds = 120.0
+
+[data]
+test_file = "data/character_operations_50k/test.jsonl"
+heldout_file = "data/character_operations_50k/heldout.jsonl"
+
+[evaluation]
+split = "test"
+resume = true
+seed = 20260919
+max_new_tokens = 192
+examples_per_operation = 100
+
+[output]
+results_dir = "results/baselines/api"

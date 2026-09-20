@@ -1,0 +1,64 @@
+{
+  "dataset": "character_operations_50k",
+  "seed": 20260919,
+  "total": 50000,
+  "split_counts": {
+    "train": 35000,
+    "dev": 5000,
+    "test": 5000,
+    "heldout": 5000
+  },
+  "negative_count": 18500,
+  "negative_fraction": 0.37,
+  "positive_count": 31500,
+  "positive_source_counts": {
+    "real_word": 9450,
+    "random_generated": 6300,
+    "augmented_word": 15750
+  },
+  "operation_counts": {
+    "REVERSE": 2625,
+    "INSERT_WORDS": 2625,
+    "FIND_CHAR": 2625,
+    "WORD_COUNT": 2625,
+    "INSERT_TEXT_IN_WORD": 2625,
+    "REVERSE_WORD_AT": 2625,
+    "INSERT_TEXT": 2625,
+    "CHAR_AT_IN_WORD": 2625,
+    "COUNT_CHAR": 2625,
+    "WORD_LENGTH_AT": 2625,
+    "STRING_LENGTH": 2625,
+    "CHAR_AT": 2625
+  },
+  "generation_style_counts": {
+    "native": 19845,
+    "cwum_style_reconstruction": 8505,
+    "native_negative": 16650,
+    "heldout_negative": 1850,
+    "heldout_native": 3150
+  },
+  "supported_operations": [
+    "COUNT_CHAR",
+    "STRING_LENGTH",
+    "FIND_CHAR",
+    "WORD_COUNT",
+    "WORD_LENGTH_AT",
+    "INSERT_TEXT",
+    "INSERT_TEXT_IN_WORD",
+    "INSERT_WORDS",
+    "CHAR_AT",
+    "CHAR_AT_IN_WORD",
+    "REVERSE",
+    "REVERSE_WORD_AT"
+  ],
+  "native_positive_source_mix": {
+    "real_word": 0.3,
+    "augmented_word": 0.5,
+    "random_generated": 0.2
+  },
+  "cwum_style_positive_fraction_nonheldout": 0.3,
+  "cwum_code_prohibited_in_primary_dataset": false,
+  "heldout_template_families_disjoint_from_train": true,
+  "exact_prompt_duplicates": 0,
+  "sha256_prompts": "89d522805ba318dc99ad6bc512d1e2b81fc92f1a233b5eb2fbf6054498aa5cc2"
+}

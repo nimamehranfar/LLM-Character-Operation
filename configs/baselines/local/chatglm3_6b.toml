@@ -1,0 +1,29 @@
+# Zero-shot local baseline only. No training is performed from this config.
+[model]
+slug = "chatglm3_6b"
+repo_id = "THUDM/chatglm3-6b"
+quantization = "4bit"
+trust_remote_code = true
+
+[data]
+test_file = "data/character_operations_50k/test.jsonl"
+heldout_file = "data/character_operations_50k/heldout.jsonl"
+
+[training]
+seed = 20260919
+
+[evaluation]
+split = "test"
+examples = -1
+examples_per_operation = -1
+resume = true
+max_new_tokens = 192
+challenge_file = "data/character_operations_50k/heldout.jsonl"
+
+[output]
+results_dir = "results/baselines/local/chatglm3_6b"
+
+[cache]
+auto_download = false
+cache_dir = ""
+revision = "main"

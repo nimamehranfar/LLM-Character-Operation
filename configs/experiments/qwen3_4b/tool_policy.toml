@@ -1,0 +1,51 @@
+[model]
+repo_id = "Qwen/Qwen3-4B"
+quantization = "4bit"
+
+[data]
+train_file = "data/character_operations_50k/train.jsonl"
+dev_file = "data/character_operations_50k/dev.jsonl"
+test_file = "data/character_operations_50k/test.jsonl"
+train_examples = 35000
+dev_examples = 5000
+test_examples = 5000
+function_mask_probability = 0.50
+
+[lora]
+r = 8
+alpha = 16
+dropout = 0.05
+gradient_checkpointing = true
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+[training]
+seed = 20260919
+epochs = 4
+learning_rate = 0.0002
+weight_decay = 0.01
+gradient_accumulation_steps = 16
+gradient_clip_norm = 1.0
+max_sequence_length = 512
+max_vram_mib = 7600
+early_stopping_patience = 2
+min_delta = 0.002
+
+[evaluation]
+split = "both"
+resume = true
+max_new_tokens = 192
+challenge_file = "data/character_operations_50k/heldout.jsonl"
+
+[output]
+checkpoint_dir = "checkpoints/qwen3_4b/tool_policy"
+adapter_dir = "checkpoints/qwen3_4b/tool_policy/final_adapter"
+results_dir = "results/qwen3_4b/tool_policy"
+
+[recovery]
+heartbeat_seconds = 15
+checkpoint_every_examples = 50
+
+[cache]
+auto_download = true
+cache_dir = ""
+revision = "1cfa9a7208912126459214e8b04321603b3df60c"

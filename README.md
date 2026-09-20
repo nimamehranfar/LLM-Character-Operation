@@ -1,43 +1,222 @@
-# Character Unit LLM — Oracle Injection Milestone
+# LLM Character Operations
 
-Current base model: `Qwen/Qwen3-4B`, loaded in 4-bit NF4 for the 8 GB RTX 4070 Laptop GPU.
+This repository implements a structured LLM interface to deterministic character/string operations. The language model decides whether an exact operation is needed and emits the operation plus arguments; deterministic code executes it; scalar results can be reintegrated into the language model through learned residual-stream injection.
 
-This milestone contains two distinct components:
+The repository is self-contained for the current experiment protocol. It does **not** include model weights, checkpoints, caches, or generated result files.
 
-1. A deterministic character executor implementing `COUNT_CHAR`, `STRING_LENGTH`, `CHAR_AT`, `REVERSE`, and `FIND_CHAR`.
-2. An **oracle residual-injection diagnostic** for `COUNT_CHAR`.
+## Supported operations
 
-The oracle diagnostic deliberately supplies the correct operation and operands. It executes the count deterministically, converts the exact result into a representation using the frozen model's own token embedding space, injects that representation into one intermediate Qwen residual stream, and measures whether the probability/rank of the exact result changes.
+`COUNT_CHAR`, `STRING_LENGTH`, `FIND_CHAR`, `WORD_COUNT`, `WORD_LENGTH_AT`, `INSERT_TEXT`, `INSERT_TEXT_IN_WORD`, `INSERT_WORDS`, `CHAR_AT`, `CHAR_AT_IN_WORD`, `REVERSE`, `REVERSE_WORD_AT`.
 
-This is **not** the final architecture and does **not** establish end-to-end accuracy. It only tests whether a deterministic result can enter and influence the frozen LM internally.
+Integer and single-character results use the learned result-injection path. Arbitrary string-transform results are returned directly from the deterministic executor and are reported separately.
 
-## Run tests
+## Frozen dataset
+
+`data/character_operations_50k/` contains the exact 50,000-example dataset used by the current protocol:
+
+| Split | Examples |
+|---|---:|
+| Train | 35,000 |
+| Dev | 5,000 |
+| IID test | 5,000 |
+| Held-out wording/style | 5,000 |
+
+The dataset contains 63% supported tasks and 37% controls. Positive strings use the preserved 30% real-word / 50% augmented-real-word / 20% random-string mix. Held-out template families are disjoint from training.
+
+The committed dataset can be regenerated deterministically:
 
 ```powershell
-python -m unittest discover -s tests -v
+python scripts/generate_dataset.py
 ```
 
-## Baseline model probe
+## Installation
+
+Python with CUDA is required for local 4-bit model evaluation/training.
 
 ```powershell
-python scripts/probe_model.py
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-## Oracle internal-injection diagnostic
+The PyTorch CUDA 12.6 package index is retained in `requirements.txt`.
+
+## Model cache behavior
+
+Every primary experiment config has:
+
+```toml
+[cache]
+auto_download = true
+cache_dir = ""
+revision = "<pinned commit>"
+```
+
+Existing local snapshots are always reused first. `cache_dir = ""` uses the normal Hugging Face cache. To keep weights somewhere else, either edit the config or pass:
 
 ```powershell
-python scripts/oracle_injection.py
+--model-cache-dir "D:\hf-models"
 ```
 
-Default diagnostic:
+You can force local-only behavior with `--no-auto-download`.
+
+The zero-shot multi-model matrix is conservative by default and does not automatically download every comparison model. To fetch missing ungated models into a chosen directory:
+
+```powershell
+python scripts/run_zero_shot_matrix.py --auto-download --model-cache-dir "D:\hf-models"
+```
+
+Some comparison repositories require accepting provider/model terms before download.
+
+## Zero-shot base-model baselines
+
+Run all configured local baseline models on both IID and held-out splits:
+
+```powershell
+python scripts/run_zero_shot_matrix.py
+```
+
+The default is the full positive-task set. Configuration is in `configs/baselines/matrix.toml` and `configs/baselines/local/`.
+
+For one model:
+
+```powershell
+python scripts/evaluate_direct.py `
+  --config configs/baselines/local/qwen3_8b.toml `
+  --mode zero_shot `
+  --split test
+```
+
+For models that do not fit locally, use an OpenAI-compatible hosted endpoint:
+
+```powershell
+$env:BASELINE_API_KEY="..."
+python scripts/evaluate_zero_shot_api.py `
+  --base-url <provider-v1-url> `
+  --model <provider-model-id> `
+  --split test
+```
+
+The hosted config defaults to a deterministic 100-example-per-operation subset to control cost.
+
+## Training sequence
+
+The primary backbone is Qwen3-8B. Qwen3-4B configs are included for smaller-backbone replication.
+
+### Direct-answer SFT comparison
+
+```powershell
+python scripts/train_direct_sft.py
+```
+
+Evaluate it with:
+
+```powershell
+python scripts/evaluate_direct.py `
+  --config configs/experiments/qwen3_8b/direct_sft.toml `
+  --mode direct_sft `
+  --split test
+```
+
+### Structured tool policy
+
+```powershell
+python scripts/train_tool_policy.py
+python scripts/evaluate_tool_policy.py
+```
+
+### Multi-layer result injection
+
+```powershell
+python scripts/train_result_injector.py
+```
+
+Qwen3-8B candidate layers are `1, 3, 5, 7, 9, 11, 13, 15`. The deployment layer is selected using dev data only. Test/held-out data never select the layer.
+
+### Complete pipeline
+
+After the tool-policy adapter and result-injection checkpoint exist, the complete evaluation requires no arguments:
+
+```powershell
+python scripts/evaluate_pipeline.py
+```
+
+It runs IID and held-out evaluation by default.
+
+### Layer-wise and oracle analysis
+
+```powershell
+python scripts/evaluate_layerwise.py
+```
+
+This records actual-policy and oracle-result behavior at every candidate layer, per-operation accuracy, gates, selected-layer accuracy, and an oracle upper bound. Oracle information is diagnostic only and is never used by the normal pipeline.
+
+## Recovery and interruption handling
+
+Training scripts use durable recovery checkpoints and heartbeat state. Evaluation scripts persist completed examples. Re-run the same command after interruption to continue.
+
+Recorded inference time excludes downtime between processes. The first model setup time is kept as the canonical setup cost; repeated model loading after resume is reported separately as resume overhead rather than silently inflating prompt latency.
+
+Use `--fresh` only when intentionally starting a new training run. Evaluation resume can be controlled with `--resume` / `--no-resume` where applicable.
+
+## Runtime telemetry
+
+Zero-shot/direct-SFT evaluation and the complete trained pipeline save:
+
+- total interruption-neutral benchmark time;
+- model setup time;
+- average, p50, p95 and p99 prompt latency;
+- input/output/total token counts;
+- output tokens per second;
+- peak allocated/reserved VRAM;
+- resume count and resume setup overhead.
+
+The trained pipeline additionally records tool-policy generation time/tokens, deterministic executor time, result-injection generation time/tokens, selected layer, and gate values.
+
+Terminal output is intentionally concise. Complete per-example records and detailed breakdowns are written to JSON/JSONL files under `results/`.
+
+## Chart-ready exports
+
+```powershell
+python scripts/export_metrics.py
+python scripts/export_runtime.py
+```
+
+`export_metrics.py` creates:
+
+- `system_comparison.csv`
+- `character_operation_analysis.csv`
+- `layer_analysis.csv`
+- `oracle_analysis.csv`
+
+`export_runtime.py` creates `results/runtime_comparison.csv` for latency/token/VRAM comparisons.
+
+## Tests
+
+```powershell
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+The test suite validates deterministic executor semantics, all 50,000 ground-truth rows, held-out template isolation, structured-call round trips, candidate-layer configs, recovery behavior, low-VRAM preparation, and runtime accounting.
+
+## Repository layout
 
 ```text
-Question: How many "r" characters are in "strawberry"?
-Oracle operation: COUNT_CHAR
-Oracle operands: text="strawberry", character="r"
-Deterministic result: 3
+configs/
+  baselines/             zero-shot local/API model configs
+  experiments/           Qwen3-8B and Qwen3-4B train/eval configs
+data/
+  character_operations_50k/
+  resources/
+scripts/                  generation, training, evaluation, export commands
+src/
+  data/
+  evaluation/
+  executor/
+  model/
+  training/
+tests/
 ```
 
-The script sweeps decoder layers `8,17,26,35` and residual strengths `0.25,0.5,1,2,4,8`. It records the next-token probability and rank of the exact deterministic result for every setting, then generates once with the strongest diagnostic setting.
-
-Do not interpret the layer/scale sweep as a fair benchmark: it is intentionally an oracle interface test on the same example.
+Primary Qwen snapshot revisions are pinned in config so a fresh cache resolves the same model revision used by this experiment protocol.

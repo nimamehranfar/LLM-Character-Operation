@@ -1,77 +1,26 @@
-# ============================================================
-# LLM Character Operation Project
-# Python + IntelliJ IDEA/PyCharm + local .venv
-# ============================================================
-
-# ----------------------------
-# Python virtual environments
-# ----------------------------
 .venv/
 venv/
-env/
-ENV/
-
-# ----------------------------
-# Python cache / bytecode
-# ----------------------------
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-.mypy_cache/
-.pyright/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-# ----------------------------
-# Packaging / build artifacts
-# ----------------------------
-build/
-dist/
-*.egg-info/
-.eggs/
-pip-wheel-metadata/
-
-# ----------------------------
-# IntelliJ IDEA / PyCharm
-# ----------------------------
 .idea/
 *.iml
-*.ipr
-*.iws
-out/
+.DS_Store
+Thumbs.db
 
-# ----------------------------
-# Jupyter
-# ----------------------------
-.ipynb_checkpoints/
-
-# ----------------------------
-# Project-local runtime state
-# ----------------------------
+# Runtime state and generated outputs
 .local/
+checkpoints/
 results/
 logs/
-tmp/
-temp/
-
-# ----------------------------
-# Experiment / training outputs
-# ----------------------------
-checkpoints/
-outputs/
 runs/
-wandb/
-tensorboard/
-lightning_logs/
+outputs/
 
-# ----------------------------
-# Local model files
-# Keep large downloaded weights out of Git.
-# ----------------------------
+# Optional local model/cache directories
 models/
+.cache/
+huggingface/
+hf_cache/
 *.safetensors
 *.bin
 *.pt
@@ -80,56 +29,10 @@ models/
 *.gguf
 *.onnx
 
-# ----------------------------
-# Hugging Face / ML caches
-# Only relevant if a cache directory is placed inside the repo.
-# ----------------------------
-.cache/
-huggingface/
-hf_cache/
-
-# ----------------------------
-# Dataset artifacts generated locally
-# Keep source code/configs tracked; ignore generated data.
-# ----------------------------
-data/generated/
-data/splits/
-data/cache/
-
-# ----------------------------
-# Local environment / secrets
-# ----------------------------
+# Secrets
 .env
 .env.*
-!.env.example
 *.pem
 *.key
-
-# ----------------------------
-# Logs / profiler / debug output
-# ----------------------------
-*.log
-*.trace
-*.prof
-*.pstats
-
-# ----------------------------
-# OS files
-# ----------------------------
-.DS_Store
-Thumbs.db
-Desktop.ini
-
-# ----------------------------
-# Editor swap / backup files
-# ----------------------------
-*.swp
-*.swo
-*~
-*.bak
-
-# ----------------------------
-# Windows-specific junk
-# ----------------------------
-$RECYCLE.BIN/
-System Volume Information/
+*.zip
+*.rar

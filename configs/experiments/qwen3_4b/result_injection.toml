@@ -1,0 +1,53 @@
+[model]
+repo_id = "Qwen/Qwen3-4B"
+quantization = "4bit"
+
+[data]
+train_file = "data/character_operations_50k/train.jsonl"
+dev_file = "data/character_operations_50k/dev.jsonl"
+test_file = "data/character_operations_50k/test.jsonl"
+train_examples = -1
+dev_examples = -1
+test_examples = -1
+
+[architecture]
+# Compatibility/reference layer from the previously accepted runs.
+# Final training is multi-layer and selects the deployment layer on dev only.
+layer_index = 12
+candidate_layers = [4, 8, 12, 17]
+result_dim = 128
+gate_dim = 64
+max_integer_result = 128
+ascii_vocab_size = 128
+gate_bias_init = -2.0
+
+[training]
+seed = 20260919
+epochs = 5
+learning_rate = 0.001
+weight_decay = 0.01
+gradient_clip_norm = 1.0
+early_stopping_patience = 2
+layer_eval_examples = 400
+max_sequence_length = 512
+max_vram_mib = 7600
+
+[evaluation]
+max_new_tokens = 128
+save_per_example = true
+run_layerwise_analysis = true
+run_oracle_phase1_analysis = true
+
+[output]
+checkpoint_dir = "checkpoints/qwen3_4b/result_injection"
+final_checkpoint = "checkpoints/qwen3_4b/result_injection/result_injector.pt"
+results_dir = "results/qwen3_4b/result_injection"
+
+[recovery]
+heartbeat_seconds = 15
+checkpoint_every_examples = 50
+
+[cache]
+auto_download = true
+cache_dir = ""
+revision = "1cfa9a7208912126459214e8b04321603b3df60c"

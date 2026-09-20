@@ -4,3 +4,6 @@ transformers>=4.51
 accelerate>=1.2
 safetensors>=0.4
 bitsandbytes>=0.45
+huggingface_hub>=0.30
+tqdm>=4.67
+peft>=0.17

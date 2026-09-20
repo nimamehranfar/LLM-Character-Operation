@@ -1,0 +1,11 @@
+# Defaults for the complete local zero-shot baseline matrix.
+# Running `python scripts/run_zero_shot_matrix.py` with no arguments uses these values.
+[evaluation]
+split = "both"
+examples_per_operation = -1
+resume = true
+
+[cache]
+auto_download = false
+cache_dir = ""
+revision = "main"
