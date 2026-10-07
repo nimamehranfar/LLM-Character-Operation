@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.data.character_dataset import load_jsonl, random_take
 from src.data.tool_policy_dataset import call_is_exact, parse_policy_output, render_tool_policy_example
 from src.model.local_model import ensure_local_model_path
+from src.model.device import select_device
 
 
 def resolve_path(value: str) -> Path:
@@ -38,13 +39,14 @@ def chat_prompt(tokenizer, system: str, user: str) -> str:
 
 
 def load_policy(cfg, *, auto_download=None, cache_dir=None):
+    device = select_device(announce=True)
     cache_cfg=cfg.get("cache", {})
     effective_auto=bool(cache_cfg.get("auto_download", False)) if auto_download is None else bool(auto_download)
     effective_cache=cache_cfg.get("cache_dir") if cache_dir is None else cache_dir
     model_path=ensure_local_model_path(cfg["model"]["repo_id"], cfg["model"].get("local_path"), auto_download=effective_auto, cache_dir=effective_cache, revision=str(cache_cfg.get("revision", "main")))
     tok=AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     quant=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type="nf4",bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
-    base=AutoModelForCausalLM.from_pretrained(model_path,local_files_only=True,device_map={"":"cuda:0"},quantization_config=quant,dtype=torch.bfloat16)
+    base=AutoModelForCausalLM.from_pretrained(model_path,local_files_only=True,device_map={"":device},quantization_config=quant,dtype=torch.bfloat16)
     model=PeftModel.from_pretrained(base, resolve_path(cfg["output"]["adapter_dir"]), is_trainable=False)
     model.eval(); return tok,model
 
@@ -89,7 +91,7 @@ def main():
     ap=argparse.ArgumentParser(description="Evaluate structured operation routing and argument extraction."); ap.add_argument("--config",default=str(REPO_ROOT/"configs/experiments/qwen3_8b/tool_policy.toml")); ap.add_argument("--test-examples",type=int,default=-1); ap.add_argument("--heldout-examples",type=int,default=-1); ap.add_argument("--auto-download",action=argparse.BooleanOptionalAction,default=None); ap.add_argument("--model-cache-dir",default=None); args=ap.parse_args()
     cfg=load_config(Path(args.config).resolve())
     if not torch.cuda.is_available(): raise RuntimeError("CUDA required")
-    props=torch.cuda.get_device_properties(0); torch.cuda.set_per_process_memory_fraction(min(1.0,int(cfg["training"]["max_vram_mib"])/(props.total_memory/1024**2)),0)
+    # Evaluation is not constrained by the laptop training-memory budget.
     tok,model=load_policy(cfg,auto_download=args.auto_download,cache_dir=args.model_cache_dir); seed=int(cfg["training"]["seed"])
     test=random_take(load_jsonl(resolve_path(cfg["data"]["test_file"])),args.test_examples,seed+2)
     held=random_take(load_jsonl(resolve_path(cfg["evaluation"]["challenge_file"])),args.heldout_examples,seed+3)

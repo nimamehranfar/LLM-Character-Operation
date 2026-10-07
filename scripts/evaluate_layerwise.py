@@ -243,6 +243,8 @@ def oracle_layer_eval(split_name, examples, policy, tok, mapper, layer, arch, p2
 def scalar_oracle_report_to_compat(layer: int, summary: dict[str, Any]) -> dict[str, Any]:
     scalar_rows = [r for r in summary["per_example"] if r["result_kind"] in {"integer", "character"}]
     metrics = summarize_rows(scalar_rows)
+    metrics["per_example"] = [{**row, "correct": row["final_exact"], "gate": row.get("gate", row.get("phase2_gate"))}
+                              for row in scalar_rows]
     return {"layer": int(layer), "metrics": metrics}
 
 

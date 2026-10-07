@@ -19,8 +19,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.character_dataset import load_jsonl
+from src.evaluation.parallel import add_shard_arguments, shard_examples
 from src.evaluation.runtime import ResumeLedger, inference_setup_metadata, telemetry_summary
 from src.model.local_model import ensure_local_model_path
+from src.model.device import model_dtype, select_device, synchronize
 
 ZERO_SHOT_SYSTEM = "Perform the requested character/string operation exactly. Output only the final answer, with no explanation."
 
@@ -66,6 +68,8 @@ def stratified_sample(rows, examples: int, examples_per_operation: int, seed: in
 
 
 def load_model(cfg: dict, mode: str, *, auto_download: bool | None, cache_dir: str | None):
+    device = select_device()
+    dtype = model_dtype(device)
     model_cfg = cfg["model"]
     cache_cfg = cfg.get("cache", {})
     effective_auto = bool(cache_cfg.get("auto_download", False)) if auto_download is None else bool(auto_download)
@@ -87,14 +91,16 @@ def load_model(cfg: dict, mode: str, *, auto_download: bool | None, cache_dir: s
     model_kwargs = {
         "local_files_only": True,
         "trust_remote_code": trust_remote_code,
-        "device_map": {"": "cuda:0"},
-        "dtype": torch.bfloat16,
+        "device_map": {"": device},
+        "dtype": dtype,
     }
     if quantization == "4bit":
+        if device.type != "cuda":
+            raise RuntimeError("4-bit evaluation requires CUDA; use --quantization none for CPU fallback")
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=dtype,
             bnb_4bit_use_double_quant=True,
         )
     base = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
@@ -106,7 +112,7 @@ def load_model(cfg: dict, mode: str, *, auto_download: bool | None, cache_dir: s
     else:
         model = base
     model.eval()
-    torch.cuda.synchronize()
+    synchronize(device)
     model_load_seconds = time.perf_counter() - model_load_started
     return model_path, tokenizer, model, effective_auto, effective_cache, cache_resolution_seconds, model_load_seconds
 
@@ -123,11 +129,23 @@ def main() -> None:
     parser.add_argument("--model-cache-dir", default=None,
                         help="Override [cache].cache_dir for Hugging Face model files.")
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--quantization", choices=["4bit", "none"], help="Override the model config")
+    parser.add_argument("--max-new-tokens", type=int, help="Override the generation token limit")
+    add_shard_arguments(parser)
     args = parser.parse_args()
+    device = select_device(announce=True)
 
     cfg = cfgload(Path(args.config).resolve())
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA required for local-model evaluation")
+    if args.local_model_path:
+        cfg["model"]["local_path"] = args.local_model_path
+    if args.quantization:
+        cfg["model"]["quantization"] = args.quantization
+    if args.max_new_tokens is not None:
+        if args.max_new_tokens < 1:
+            parser.error("--max-new-tokens must be positive")
+        cfg.setdefault("evaluation", {})["max_new_tokens"] = args.max_new_tokens
+    if device.type == "cpu" and cfg["model"].get("quantization", "4bit") == "4bit":
+        raise RuntimeError("4-bit evaluation requires CUDA; use --quantization none for CPU fallback")
 
     data_cfg = cfg["data"]
     eval_cfg = cfg.get("evaluation", {})
@@ -140,23 +158,26 @@ def main() -> None:
     examples = int(eval_cfg.get("examples", -1)) if args.examples is None else int(args.examples)
     per_op = int(eval_cfg.get("examples_per_operation", -1)) if args.examples_per_operation is None else int(args.examples_per_operation)
     rows = stratified_sample(rows, examples, per_op, seed)
+    rows, shard = shard_examples(rows, args.shard_index, args.shard_count)
 
-    results_dir = resolve(cfg.get("output", {}).get("results_dir", "results/baselines/local"))
+    results_dir = resolve(args.results_dir or cfg.get("output", {}).get("results_dir", "results/baselines/local"))
     results_dir.mkdir(parents=True, exist_ok=True)
     model_slug = cfg["model"].get("slug", cfg["model"]["repo_id"].replace("/", "__"))
-    output_path = results_dir / f"{model_slug}_{args.mode}_{split}.json"
+    output_path = resolve(args.report_path) if args.report_path else results_dir / f"{model_slug}_{args.mode}_{split}.json"
     progress_path = results_dir / f"{model_slug}_{args.mode}_{split}.progress.jsonl"
     state_path = results_dir / f"{model_slug}_{args.mode}_{split}.progress.state.json"
     resume = bool(eval_cfg.get("resume", True)) if args.resume is None else bool(args.resume)
     ledger = ResumeLedger(state_path, progress_path, enabled=resume)
     completed = ledger.load_completed()
 
-    if len(completed) >= len(rows) and output_path.exists():
+    if all(row.example_id in completed for row in rows) and output_path.exists():
+        ledger.mark_complete()
         print(f"Already complete: {output_path}")
         return
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
     model_path, tokenizer, model, effective_auto, effective_cache, cache_resolution_seconds, model_load_seconds = load_model(
         cfg, args.mode, auto_download=args.auto_download, cache_dir=args.model_cache_dir
     )
@@ -172,7 +193,7 @@ def main() -> None:
             inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
             input_tokens = int(inputs["input_ids"].numel())
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
-            torch.cuda.synchronize()
+            synchronize(device)
             started = time.perf_counter()
             output = model.generate(
                 **inputs,
@@ -182,7 +203,7 @@ def main() -> None:
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            torch.cuda.synchronize()
+            synchronize(device)
             generation_seconds = time.perf_counter() - started
             generated_ids = output[0, inputs["input_ids"].shape[1]:]
             output_tokens = int(generated_ids.numel())
@@ -255,11 +276,12 @@ def main() -> None:
     runtime = telemetry_summary(details, ledger_state)
     runtime.update({
         "cache_resolution_seconds_current_session": cache_resolution_seconds,
-        "peak_allocated_vram_mib": torch.cuda.max_memory_allocated() / (1024 ** 2),
-        "peak_reserved_vram_mib": torch.cuda.max_memory_reserved() / (1024 ** 2),
+        "peak_allocated_vram_mib": torch.cuda.max_memory_allocated(device) / (1024 ** 2) if device.type == "cuda" else 0.0,
+        "peak_reserved_vram_mib": torch.cuda.max_memory_reserved(device) / (1024 ** 2) if device.type == "cuda" else 0.0,
     })
     report = {
         "mode": args.mode,
+        "shard": shard,
         "model_repo_id": cfg["model"]["repo_id"],
         "model_path": str(model_path),
         "split": split,
@@ -275,8 +297,9 @@ def main() -> None:
         **{name: convert(table) for name, table in tables.items()},
         "per_example": details,
     }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"{args.mode} {split}: accuracy={report['exact_match_accuracy']:.4f} | n={report['example_count']} | avg={runtime.get('average_seconds_per_prompt',0.0):.4f}s | p95={runtime.get('p95_seconds_per_prompt',0.0):.4f}s | output_tok/s={runtime.get('output_tokens_per_second',0.0):.2f} | peak_vram={runtime.get('peak_allocated_vram_mib',0.0):.1f} MiB")
+    print(f"{args.mode} {split}: accuracy={report['exact_match_accuracy']:.4f} | n={report['example_count']} | avg={runtime.get('average_seconds_per_prompt') or 0.0:.4f}s | p95={runtime.get('p95_seconds_per_prompt') or 0.0:.4f}s | output_tok/s={runtime.get('output_tokens_per_second') or 0.0:.2f} | peak_vram={runtime.get('peak_allocated_vram_mib',0.0):.1f} MiB")
     print(f"Results: {output_path}")
 
 

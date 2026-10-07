@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from src.model.device import model_dtype, select_device
 
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
@@ -160,8 +161,10 @@ def inference_setup_metadata(*, model_repo_id: str, model_path: str | Path | Non
         'model_repo_id': model_repo_id,
         'model_path': None if model_path is None else str(model_path),
         'quantization': quantization,
-        'dtype': 'bfloat16',
-        'device': 'cuda:0' if torch.cuda.is_available() else 'cpu',
+        'dtype': str(model_dtype(select_device())).removeprefix('torch.'),
+        'device': f'cuda:{torch.cuda.current_device()}' if torch.cuda.is_available() else 'cpu',
+        'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+        'slurm_job_id': os.environ.get('SLURM_JOB_ID'),
         'batch_size': int(batch_size),
         'max_new_tokens': int(max_new_tokens),
         'do_sample': bool(do_sample),
@@ -171,7 +174,7 @@ def inference_setup_metadata(*, model_repo_id: str, model_path: str | Path | Non
         'cuda_runtime': torch.version.cuda,
     }
     if torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(0)
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
         meta.update({
             'gpu_name': props.name,
             'gpu_total_vram_mib': props.total_memory / (1024 ** 2),

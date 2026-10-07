@@ -1,0 +1,25 @@
+[model]
+slug = "qwen3_4b"
+repo_id = "Qwen/Qwen3-4B"
+quantization = "4bit"
+tool_interface = "qwen"
+
+[data]
+test_file = "data/character_operations_50k/test.jsonl"
+heldout_file = "data/character_operations_50k/heldout.jsonl"
+
+[training]
+# Sampling/catalog seed only; this baseline performs no training.
+seed = 20260919
+
+[evaluation]
+max_new_tokens = 192
+final_max_new_tokens = 128
+
+[output]
+results_dir = "results/baselines/tools/qwen3_4b"
+
+[cache]
+auto_download = false
+cache_dir = ""
+revision = "1cfa9a7208912126459214e8b04321603b3df60c"

@@ -104,6 +104,7 @@ def test_zero_shot_matrix_has_expected_small_models():
     assert matrix["evaluation"]["split"] == "both"
     assert matrix["evaluation"]["examples_per_operation"] == -1
     assert matrix["evaluation"]["resume"] is True
+    assert matrix["evaluation"]["continue_on_error"] is True
     assert "cache_dir" in matrix["cache"]
 
 
@@ -122,7 +123,11 @@ def test_pipeline_defaults_and_runtime_telemetry_present():
 def test_public_layout_has_no_historical_naming_in_paths():
     bad = []
     version_pattern = re.compile(r"(^|[_-])v(?:4|5|6|7)(?:[_-]|$)", re.IGNORECASE)
-    for path in ROOT.rglob("*"):
+    # Check project-owned source paths, not installed dependencies or local caches.
+    paths = [ROOT / name for name in ("README.md", "requirements.txt", "requirements-dev.txt")]
+    for directory in ("src", "scripts", "configs", "docs", "tests", "data"):
+        paths.extend((ROOT / directory).rglob("*"))
+    for path in paths:
         rel = str(path.relative_to(ROOT)).replace("\\", "/")
         low = rel.lower()
         if "__pycache__" in low:
@@ -130,3 +135,16 @@ def test_public_layout_has_no_historical_naming_in_paths():
         if ("i"+"gc") in low or ("pa"+"per") in low or version_pattern.search(low):
             bad.append(rel)
     assert bad == []
+
+
+def test_runtime_requirements_cover_configured_legacy_tokenizers():
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    for dependency in ("sentencepiece", "protobuf", "tiktoken", "einops", "transformers_stream_generator"):
+        assert dependency in requirements
+
+
+def test_matrix_runner_continues_after_subprocess_failure():
+    text = (ROOT / "scripts" / "run_zero_shot_matrix.py").read_text(encoding="utf-8")
+    assert "capture_output=True" in text
+    assert "continue_on_error" in text
+    assert "FAIL {config.stem} {one_split}" in text

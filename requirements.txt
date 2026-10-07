@@ -1,9 +1,14 @@
---extra-index-url https://download.pytorch.org/whl/cu126
+# Install the GPU-compatible PyTorch wheel first; see scripts/setup_environment.py.
 torch>=2.5
-transformers>=4.51
-accelerate>=1.2
-safetensors>=0.4
-bitsandbytes>=0.45
-huggingface_hub>=0.30
-tqdm>=4.67
-peft>=0.17
+transformers==4.56.2
+accelerate==1.15.0
+safetensors==0.8.0
+bitsandbytes==0.50.2
+huggingface_hub==0.36.2
+tqdm==4.70.1
+peft==0.21.0
+sentencepiece==0.2.2
+protobuf==7.36.2
+tiktoken==0.14.0
+einops==0.8.2
+transformers_stream_generator==0.0.5

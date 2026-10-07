@@ -34,5 +34,4 @@ hf_cache/
 .env.*
 *.pem
 *.key
-*.zip
-*.rar
+/LLM-Character-Operation_old.rar

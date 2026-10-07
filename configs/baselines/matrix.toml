@@ -4,8 +4,9 @@
 split = "both"
 examples_per_operation = -1
 resume = true
+continue_on_error = true
 
 [cache]
-auto_download = false
+auto_download = true
 cache_dir = ""
 revision = "main"

@@ -33,6 +33,7 @@ from src.data.tool_policy_dataset import (
 )
 from src.data.character_dataset import load_jsonl, random_take
 from src.model.local_model import ensure_local_model_path
+from src.model.device import select_device
 from src.training.low_vram_qlora import prepare_4bit_lora_base_low_vram
 from src.training.recovery import (
     GracefulStop,
@@ -73,15 +74,18 @@ def set_seed(seed: int) -> None:
 
 
 def configure_vram_limit(max_vram_mib: int) -> None:
+    device = select_device(announce=True)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    props = torch.cuda.get_device_properties(0)
+    props = torch.cuda.get_device_properties(device)
     total_mib = props.total_memory / 1024**2
-    fraction = min(1.0, max_vram_mib / total_mib)
-    torch.cuda.set_per_process_memory_fraction(fraction, device=0)
+    if max_vram_mib < 0:
+        raise ValueError("max-vram-mib must be nonnegative; 0 uses the whole visible GPU")
+    fraction = min(1.0, max_vram_mib / total_mib) if max_vram_mib else 1.0
+    torch.cuda.set_per_process_memory_fraction(fraction, device=device)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    console(f"GPU: {props.name}; physical={total_mib:.1f} MiB; PyTorch ceiling={max_vram_mib} MiB")
+    console(f"GPU: {props.name}; physical={total_mib:.1f} MiB; PyTorch ceiling={fraction * total_mib:.1f} MiB")
 
 
 def chat_prompt(tokenizer, system_prompt: str, user_prompt: str) -> str:
@@ -146,7 +150,7 @@ def load_model_and_tokenizer(
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         local_files_only=True,
-        device_map={"": "cuda:0"},
+        device_map={"": select_device()},
         quantization_config=quant,
         dtype=torch.bfloat16,
     )
@@ -256,10 +260,13 @@ def main() -> None:
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--max-vram-mib", type=int, help="Override the memory ceiling; 0 uses the whole visible GPU")
     args = parser.parse_args()
 
     cfg_path = Path(args.config).resolve()
     cfg = load_config(cfg_path)
+    if args.max_vram_mib is not None:
+        cfg["training"]["max_vram_mib"] = args.max_vram_mib
     seed = int(cfg["training"]["seed"])
     set_seed(seed)
     checkpoint_root = resolve_path(cfg["output"]["checkpoint_dir"])
@@ -308,7 +315,7 @@ def main() -> None:
             for state in optimizer.state.values():
                 for key, value in list(state.items()):
                     if torch.is_tensor(value):
-                        state[key] = value.to("cuda:0")
+                        state[key] = value.to(model.device)
             restore_rng_state(latest.get("rng_state", {}))
             epoch = int(latest["epoch"])
             cursor = int(latest["cursor"])

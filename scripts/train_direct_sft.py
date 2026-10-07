@@ -55,8 +55,9 @@ def eval_em(model,tok,rows,max_new):
 def cpu_state(model):return {k:v.detach().cpu() for k,v in get_peft_model_state_dict(model).items()}
 
 def main():
-    ap=argparse.ArgumentParser(description='Train the direct-answer SFT comparison model.');ap.add_argument('--config',default=str(REPO_ROOT/'configs/experiments/qwen3_8b/direct_sft.toml'));ap.add_argument('--auto-download',action=argparse.BooleanOptionalAction,default=None);ap.add_argument('--model-cache-dir',default=None);ap.add_argument('--fresh',action='store_true');ap.add_argument('--run-dir',default='');ap.add_argument('--status',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser(description='Train the direct-answer SFT comparison model.');ap.add_argument('--config',default=str(REPO_ROOT/'configs/experiments/qwen3_8b/direct_sft.toml'));ap.add_argument('--auto-download',action=argparse.BooleanOptionalAction,default=None);ap.add_argument('--model-cache-dir',default=None);ap.add_argument('--fresh',action='store_true');ap.add_argument('--run-dir',default='');ap.add_argument('--status',action='store_true');ap.add_argument('--max-vram-mib',type=int,help='Memory ceiling; 0 uses the whole visible GPU');args=ap.parse_args()
     cp=Path(args.config).resolve();cfg=cfgload(cp);seed=int(cfg['training']['seed']);random.seed(seed);torch.manual_seed(seed)
+    if args.max_vram_mib is not None: cfg['training']['max_vram_mib']=args.max_vram_mib
     root=resolve(cfg['output']['checkpoint_dir'])
     if args.status:RecoveryManager.print_status(checkpoint_root=root,config=cfg,script_version=SCRIPT_VERSION);return
     mgr=RecoveryManager.create_or_resume(checkpoint_root=root,config=cfg,config_path=str(cp),script_version=SCRIPT_VERSION,heartbeat_seconds=float(cfg['recovery']['heartbeat_seconds']),fresh=bool(args.fresh),explicit_run_dir=Path(args.run_dir).resolve() if args.run_dir else None)

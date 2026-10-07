@@ -21,9 +21,11 @@ if str(REPO_ROOT) not in sys.path:
 from src.data.character_dataset import load_jsonl, SCALAR_RESULT_OPERATIONS, STRING_RESULT_OPERATIONS
 from src.data.tool_policy_dataset import render_tool_policy_example, parse_policy_output, call_is_exact
 from src.evaluation.runtime import ResumeLedger, inference_setup_metadata, telemetry_summary
+from src.evaluation.parallel import add_shard_arguments, shard_examples
 from src.evaluation.pipeline import execute_parsed_call
 from src.executor.operations import CharacterExecutor
 from src.model.local_model import ensure_local_model_path
+from src.model.device import select_device
 from src.model.result_injector import (
     LayeredSymbolicResultMapper, SymbolicResultMapper, TrainableLayeredResultInjector,
     TrainableOracleResultInjector, result_to_symbol,
@@ -108,6 +110,7 @@ def phase2_generate(policy, tok, mapper, layer: int, result, prompt: str, max_ne
 
 
 def load_all(p1, p2, *, auto_download: bool | None = None, cache_dir: str | None = None):
+    device = select_device(announce=True)
     cache_cfg = p1.get('cache', {})
     effective_auto = bool(cache_cfg.get('auto_download', False)) if auto_download is None else bool(auto_download)
     effective_cache = cache_dir if cache_dir is not None else cache_cfg.get('cache_dir')
@@ -121,7 +124,7 @@ def load_all(p1, p2, *, auto_download: bool | None = None, cache_dir: str | None
     tok = AutoTokenizer.from_pretrained(mp, local_files_only=True)
     q = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4',
                            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-    base = AutoModelForCausalLM.from_pretrained(mp, local_files_only=True, device_map={'': 'cuda:0'},
+    base = AutoModelForCausalLM.from_pretrained(mp, local_files_only=True, device_map={'': device},
                                                 quantization_config=q, dtype=torch.bfloat16)
     policy = PeftModel.from_pretrained(base, resolve(p1['output']['adapter_dir']), is_trainable=False)
     raw = torch.load(resolve(p2['output']['final_checkpoint']), map_location='cpu', weights_only=False)
@@ -229,10 +232,12 @@ def main():
     ap.add_argument('--auto-download',action=argparse.BooleanOptionalAction,default=None)
     ap.add_argument('--model-cache-dir',default=None)
     ap.add_argument('--resume',action=argparse.BooleanOptionalAction,default=None)
+    add_shard_arguments(ap)
     args=ap.parse_args()
     p1=cfgload(Path(args.phase1_config).resolve()); p2=cfgload(Path(args.phase2_config).resolve())
+    if args.local_model_path: p1['model']['local_path']=args.local_model_path
     if not torch.cuda.is_available(): raise RuntimeError('CUDA required')
-    results_dir=resolve(p1['output']['results_dir']); results_dir.mkdir(parents=True,exist_ok=True)
+    results_dir=resolve(args.results_dir or p1['output']['results_dir']); results_dir.mkdir(parents=True,exist_ok=True)
     progress_path=results_dir/'pipeline_progress.jsonl'; state_path=results_dir/'pipeline_progress.state.json'
     resume=bool(p1.get('evaluation',{}).get('resume',True)) if args.resume is None else bool(args.resume)
     ledger=ResumeLedger(state_path,progress_path,enabled=resume); completed=ledger.load_completed()
@@ -244,6 +249,9 @@ def main():
     requested=[]
     if split in {'test','both'}: requested.append(('test',test))
     if split in {'heldout','both'}: requested.append(('heldout_template_challenge',held))
+    if args.report_path and len(requested) != 1: ap.error('--report-path requires a single --split')
+    sharded = [shard_examples(rows,args.shard_index,args.shard_count) for _,rows in requested]
+    requested = [(name,part[0]) for (name,_),part in zip(requested,sharded)]
     split_rows={}
     try:
         for name,rows in requested: split_rows[name]=evaluate(name,rows,policy,tok,mapper,layer,arch,p1,p2,completed,ledger)
@@ -255,6 +263,7 @@ def main():
     global_runtime.update({'cache_resolution_seconds_current_session':cache_resolution_seconds,'peak_allocated_vram_mib':torch.cuda.max_memory_allocated()/(1024**2),'peak_reserved_vram_mib':torch.cuda.max_memory_reserved()/(1024**2)})
     report={
         'experiment':'character_operation_pipeline','phase2_candidate_layers':layers,'phase2_selected_layer':layer,
+        'shard':sharded[0][1] if len(sharded)==1 else {'splits':{name:part[1] for (name,_),part in zip(requested,sharded)}},
         'phase2_layer_selection':raw_phase2.get('selection_rule','checkpoint-selected layer'),
         'inference_setup':inference_setup_metadata(model_repo_id=p1['model']['repo_id'],model_path=model_path,
             quantization=str(p1['model'].get('quantization','4bit')),max_new_tokens=max(int(p1['evaluation']['max_new_tokens']),int(p2['evaluation']['max_new_tokens'])),
@@ -271,12 +280,13 @@ def main():
         task_rows=[r for r in rows if not r['is_control']]; control_rows=[r for r in rows if r['is_control']]
         report[name]['runtime_supported_tasks']=telemetry_summary(task_rows,fake_state)
         report[name]['runtime_controls']=telemetry_summary(control_rows,fake_state)
-    rp=results_dir/'pipeline_results.json'; rp.write_text(json.dumps(report,indent=2),encoding='utf-8')
+    rp=resolve(args.report_path) if args.report_path else results_dir/'pipeline_results.json'
+    rp.parent.mkdir(parents=True,exist_ok=True); rp.write_text(json.dumps(report,indent=2),encoding='utf-8')
     for name,_ in requested:
         row=report[name]; rt=row.get('runtime',{})
         label='IID' if name=='test' else 'Held-out'
-        print(f"{label}: overall={row['overall_system_success']:.4f} | tasks={row['supported_task_system_exact']:.4f} | readiness={row['phase1_execution_readiness']:.4f} | control_no_call={row['control_no_call_accuracy']:.4f} | avg={rt.get('average_seconds_per_prompt',0.0):.4f}s | p95={rt.get('p95_seconds_per_prompt',0.0):.4f}s")
-    print(f"Runtime: total={global_runtime.get('benchmark_total_seconds',0.0):.2f}s | avg={global_runtime.get('average_seconds_per_prompt',0.0):.4f}s | output_tok/s={global_runtime.get('output_tokens_per_second',0.0):.2f} | peak_vram={global_runtime.get('peak_allocated_vram_mib',0.0):.1f} MiB")
+        print(f"{label}: overall={row['overall_system_success']:.4f} | tasks={row['supported_task_system_exact']:.4f} | readiness={row['phase1_execution_readiness']:.4f} | control_no_call={row['control_no_call_accuracy']:.4f} | avg={rt.get('average_seconds_per_prompt') or 0.0:.4f}s | p95={rt.get('p95_seconds_per_prompt') or 0.0:.4f}s")
+    print(f"Runtime: total={global_runtime.get('benchmark_total_seconds',0.0):.2f}s | avg={global_runtime.get('average_seconds_per_prompt') or 0.0:.4f}s | output_tok/s={global_runtime.get('output_tokens_per_second') or 0.0:.2f} | peak_vram={global_runtime.get('peak_allocated_vram_mib',0.0):.1f} MiB")
     print(f'Results: {rp}')
 
 

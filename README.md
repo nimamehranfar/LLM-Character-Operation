@@ -2,7 +2,7 @@
 
 This repository implements a structured LLM interface to deterministic character/string operations. The language model decides whether an exact operation is needed and emits the operation plus arguments; deterministic code executes it; scalar results can be reintegrated into the language model through learned residual-stream injection.
 
-The repository is self-contained for the current experiment protocol. It does **not** include model weights, checkpoints, caches, or generated result files.
+The source and frozen dataset are self-contained for the current experiment protocol. Model weights, checkpoints, caches and generated results are local artifacts excluded from Git.
 
 ## Supported operations
 
@@ -31,15 +31,31 @@ python scripts/generate_dataset.py
 
 ## Installation
 
-Python with CUDA is required for local 4-bit model evaluation/training.
+Python **3.11 or newer** and a compatible NVIDIA driver are required for local 4-bit model evaluation/training. The same source runs on Windows and Linux.
+
+Windows:
 
 ```powershell
-python -m venv .venv
+python scripts/setup_environment.py --dev
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 ```
 
-The PyTorch CUDA 12.6 package index is retained in `requirements.txt`.
+Linux:
+
+```bash
+python3 scripts/setup_environment.py --dev
+source .venv/bin/activate
+```
+
+Setup chooses CUDA 12.6 for older GPU generations or CUDA 12.8 for Blackwell, then checks each visible GPU. Override with `--cuda cu126`, `--cuda cu128` or `--torch-index-url` to match the server. It does not install the NVIDIA driver. Runtime requirements pin Transformers to 4.56.2 for the legacy comparison models. Exact installed versions are recorded in `.venv/installed-requirements.txt`.
+
+See [Windows/Linux deployment and multi-GPU commands](docs/DEPLOYMENT.md) for model downloads, checkpoint transfer, server evaluation and portable packaging.
+
+For an existing environment:
+
+```text
+python scripts/check_environment.py --require-cuda --gpu-smoke-test
+```
 
 ## Model cache behavior
 
@@ -60,7 +76,7 @@ Existing local snapshots are always reused first. `cache_dir = ""` uses the norm
 
 You can force local-only behavior with `--no-auto-download`.
 
-The zero-shot multi-model matrix is conservative by default and does not automatically download every comparison model. To fetch missing ungated models into a chosen directory:
+The zero-shot matrix's download behavior is configured in `configs/baselines/matrix.toml`; `--no-auto-download` forces local-only use. To fetch missing ungated models into a chosen directory:
 
 ```powershell
 python scripts/run_zero_shot_matrix.py --auto-download --model-cache-dir "D:\hf-models"
@@ -98,6 +114,29 @@ python scripts/evaluate_zero_shot_api.py `
 ```
 
 The hosted config defaults to a deterministic 100-example-per-operation subset to control cost.
+
+## Off-the-shelf tool-calling comparisons
+
+Compare the released Qwen3-4B/8B, Phi-4-mini and Hermes-3-8B models using the same
+character executor with ordinary text tool feedback:
+
+```powershell
+python scripts/run_tool_feedback_matrix.py --preflight
+python scripts/run_tool_feedback_matrix.py
+```
+
+On a multi-GPU server, distribute each model's selected examples across all visible GPUs:
+
+```text
+python scripts/run_tool_feedback_matrix.py --gpus auto --auto-download
+```
+
+The zero-shot matrix also accepts `--gpus auto`. Direct evaluation commands retain their single-GPU defaults. Use `scripts/evaluate_multi_gpu.py` for a single model or the trained pipeline; see the deployment guide.
+
+These baselines use existing function-calling interfaces, with no additional
+training or mapper. A trained-selector/text-feedback comparison is also available
+to isolate the mapper's contribution. See [the protocol and commands](docs/TOOL_FEEDBACK_BASELINES.md)
+for pilot runs, name masking, paired comparisons and separate control/task scores.
 
 ## Training sequence
 
@@ -220,3 +259,15 @@ tests/
 ```
 
 Primary Qwen snapshot revisions are pinned in config so a fresh cache resolves the same model revision used by this experiment protocol.
+
+## Local baseline matrix notes
+
+See [SLURM and clean baseline commands](docs/SLURM_BASELINES.md) for one-GPU jobs, all 13 configured models, model selection, automatic downloads and optional cleanup. Each invocation creates a unique result folder, CSV summary and ZIP. Incomplete matrices exit with code 1. Use `--resume-run <folder>` with matching evaluation options to recover a specific run.
+
+Install the full runtime requirements before evaluating the heterogeneous comparison models:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Some Hugging Face repositories are gated. If your account has access, authenticate once with `hf auth login`; otherwise the matrix records the model as `SKIP` and continues. Individual model/split failures are also reported concisely and do not abort the remaining matrix by default. Set `evaluation.continue_on_error = false` in `configs/baselines/matrix.toml` or pass `--no-continue-on-error` for fail-fast behavior.

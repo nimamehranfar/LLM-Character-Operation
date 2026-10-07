@@ -109,20 +109,20 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--run-dir", default="")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--max-vram-mib", type=int, help="Override the memory ceiling; 0 uses the whole visible GPU")
     args = ap.parse_args()
 
     cfg_path = Path(args.config).resolve()
     cfg = load_config(cfg_path)
+    if args.max_vram_mib is not None:
+        cfg["training"]["max_vram_mib"] = args.max_vram_mib
     seed = int(cfg["training"]["seed"])
     set_seed(seed)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA required")
 
-    props = torch.cuda.get_device_properties(0)
-    torch.cuda.set_per_process_memory_fraction(
-        min(1.0, int(cfg["training"].get("max_vram_mib", 7600)) / (props.total_memory / 1024**2)), 0
-    )
-    torch.cuda.reset_peak_memory_stats()
+    from scripts.train_tool_policy import configure_vram_limit
+    configure_vram_limit(int(cfg["training"].get("max_vram_mib", 7600)))
 
     root = resolve_path(cfg["output"]["checkpoint_dir"])
     if args.status:
