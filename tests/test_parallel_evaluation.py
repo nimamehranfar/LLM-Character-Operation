@@ -107,6 +107,7 @@ def test_vram_override_uses_whole_gpu_and_keeps_laptop_default(monkeypatch):
     import torch
     fractions = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="audit", total_memory=80*1024**3))
     monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction", lambda fraction, device: fractions.append(fraction))
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)

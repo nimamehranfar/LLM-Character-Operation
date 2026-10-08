@@ -191,18 +191,34 @@ def test_download_preparation_can_resume_offline_and_cleanup(monkeypatch, tmp_pa
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "success"
 
 
-def test_login_node_setup_defers_only_gpu_checks(monkeypatch, tmp_path):
+@pytest.mark.parametrize("options,torch_build,index", [
+    ([], "torch==2.8.0+cu126", "https://download.pytorch.org/whl/cu126"),
+    (["--cuda", "cu128"], "torch==2.8.0+cu128", "https://download.pytorch.org/whl/cu128"),
+    (["--cuda", "cu130"], "torch==2.9.1+cu130", "https://download.pytorch.org/whl/cu130"),
+    (["--torch-index-url", "https://download.pytorch.org/whl/cu128"],
+     "torch==2.8.0", "https://download.pytorch.org/whl/cu128"),
+])
+def test_login_node_setup_preserves_cuda_choice_and_defers_gpu_checks(monkeypatch, tmp_path, options, torch_build, index):
     import scripts.setup_environment as setup
     commands = []
     def run(command, **kwargs):
         commands.append(command)
+        assert "nvidia-smi" not in command
         return SimpleNamespace(stdout="fixture==1\n")
     monkeypatch.setattr(setup.subprocess, "run", run)
-    monkeypatch.setattr(setup.sys, "argv", ["setup", "--venv", str(tmp_path), "--cuda", "cu128", "--skip-gpu-check"])
+    monkeypatch.setattr(setup.sys, "argv", ["setup", "--venv", str(tmp_path), "--skip-gpu-check", "--dev", *options])
     setup.main()
     assert "check_environment.py" in commands[-1][1]
     assert "--require-cuda" not in commands[-1] and "--gpu-smoke-test" not in commands[-1]
-    assert any("cu128" in str(part) for command in commands for part in command)
+    installs = [command for command in commands if "install" in command]
+    torch_command = next(command for command in installs if torch_build in command)
+    assert torch_command[torch_command.index("--index-url") + 1] == index
+    dependency_command = next(command for command in installs if "-r" in command)
+    dependency_file = Path(dependency_command[dependency_command.index("-r") + 1])
+    dependencies = dependency_file.read_text()
+    assert "torch==" not in dependencies and "--extra-index-url" not in dependencies
+    assert "transformers==4.56.2" in dependencies and "pytest>=8.0" in dependencies
+    assert "-r requirements.txt" not in dependencies
 
 
 def test_real_cpu_evaluator_exports_and_deletes_owned_fixture(monkeypatch, tmp_path):

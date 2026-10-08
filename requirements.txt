@@ -1,5 +1,7 @@
-# Install the GPU-compatible PyTorch wheel first; see scripts/setup_environment.py.
-torch>=2.5
+# Default GPU build for H100 and RTX 4070 (Linux/Windows x86_64).
+# The CUDA suffix prevents pip from selecting a CPU-only build.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.8.0+cu126
 transformers==4.56.2
 accelerate==1.15.0
 safetensors==0.8.0

@@ -1,6 +1,6 @@
 # Windows and Linux deployment
 
-Use Python 3.11+ and an NVIDIA GPU with a compatible driver. Run `nvidia-smi` first. Install the driver through the server administrator or operating-system instructions if it is absent. A scheduler allocation must expose the GPUs to this process; the launcher respects `CUDA_VISIBLE_DEVICES`.
+Use Python 3.11+ and an NVIDIA GPU with a compatible driver. On SLURM, verify GPU access through `scripts/check_environment.py` inside an allocation; `nvidia-smi` access is not required for default H100 installation. Install the driver through the server administrator or operating-system instructions if it is absent. The launcher respects the scheduler's `CUDA_VISIBLE_DEVICES`.
 
 ## Get the complete source
 
@@ -32,14 +32,16 @@ python3 scripts/setup_environment.py --dev
 source .venv/bin/activate
 ```
 
-The bootstrap creates or updates `.venv`, installs PyTorch first from the CUDA wheel index, installs project/test requirements, records installed versions and checks every visible GPU with a tiny NF4 computation. It selects `cu128` for GPUs with compute capability 10+ and `cu126` otherwise. If detection fails, it uses `cu126`. Explicit choices:
+The bootstrap creates or updates `.venv`, installs PyTorch first from the CUDA wheel index, installs project/test dependencies, records installed versions and checks every visible GPU with a tiny NF4 computation. Its default is `torch==2.8.0+cu126`, matching `requirements.txt` for the H100 server and RTX 4070 on Linux/Windows x86_64. Default installation does not call `nvidia-smi`. Direct `python -m pip install -r requirements.txt` also selects that exact GPU wheel; the CUDA suffix excludes CPU-only builds.
+
+Explicit `--cuda cu128` uses PyTorch 2.8.0 with CUDA 12.8; `--cuda cu130` uses PyTorch 2.9.1 with CUDA 13.0. Optional `--cuda auto` probes GPU generation, selecting `cu128` for compute capability 10+ and `cu126` otherwise, with `cu126` as its detection-failure fallback. Remaining dependencies install from `.venv/runtime-requirements.txt`, excluding the default PyTorch pin so an explicit CUDA/platform override is preserved. Example overrides:
 
 ```text
 python scripts/setup_environment.py --cuda cu128 --dev
 python scripts/setup_environment.py --torch-index-url https://download.pytorch.org/whl/cu128 --dev
 ```
 
-Choose a wheel family supported by the GPU and installed driver. A newer GPU can require a newer driver. ARM64 servers require their platform-specific PyTorch index supplied through `--torch-index-url`; the bootstrap does not guess it. Custom PyTorch builds can instead be installed manually in the environment before `pip install -r requirements-dev.txt`.
+Choose a wheel family supported by the GPU and installed driver. A newer GPU can require a newer driver. ARM64 servers require their platform-specific PyTorch index supplied through `--torch-index-url`; the bootstrap does not guess it. Direct requirements installation targets Linux/Windows x86_64 with the CUDA 12.6 pin; use the bootstrap's platform/CUDA override when a different build is needed.
 
 Fresh installs pin `transformers==4.56.2` because the legacy Qwen-7B generator depends on exports removed in later releases, including `BeamSearchScorer` in 4.57. Existing research reports retain their recorded versions and are not rewritten. Package lists inside `.venv/installed-requirements.txt` document that machine's installation; hardware-specific wheels should not be copied blindly between Windows and Linux.
 

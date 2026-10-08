@@ -47,7 +47,7 @@ python3 scripts/setup_environment.py --dev
 source .venv/bin/activate
 ```
 
-Setup chooses CUDA 12.6 for older GPU generations or CUDA 12.8 for Blackwell, then checks each visible GPU. Override with `--cuda cu126`, `--cuda cu128` or `--torch-index-url` to match the server. It does not install the NVIDIA driver. Runtime requirements pin Transformers to 4.56.2 for the legacy comparison models. Exact installed versions are recorded in `.venv/installed-requirements.txt`.
+Both `pip install -r requirements.txt` and setup default to `torch==2.8.0+cu126` for the H100 server and local RTX 4070. Default setup does not call `nvidia-smi`. For Blackwell select `--cuda cu128`, or use `--cuda auto` to probe GPU generation. `--torch-index-url` supports a custom platform index. Setup installs the chosen PyTorch build separately so these overrides are preserved, then checks each visible GPU. It does not install the NVIDIA driver. Transformers remains pinned to 4.56.2 for the legacy comparison models. Exact installed versions are recorded in `.venv/installed-requirements.txt`.
 
 See [Windows/Linux deployment and multi-GPU commands](docs/DEPLOYMENT.md) for model downloads, checkpoint transfer, server evaluation and portable packaging.
 

@@ -8,6 +8,22 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+TORCH_VERSIONS = {"cu126": "2.8.0", "cu128": "2.8.0", "cu130": "2.9.1"}
+
+
+def runtime_requirements(*, dev=False):
+    """Keep explicit CUDA/platform overrides from being replaced by the default.
+
+    Direct pip installation uses requirements.txt's H100 default; the bootstrap
+    installs its selected PyTorch build separately from other dependencies.
+    """
+    lines = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    lines = [line for line in lines if not line.strip().startswith(
+        ("torch==", "torch>=", "--extra-index-url"))]
+    if dev:
+        lines.extend(line for line in (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines()
+                     if line.strip() != "-r requirements.txt")
+    return "\n".join(lines) + "\n"
 
 
 def select_cuda():
@@ -25,7 +41,8 @@ def select_cuda():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--venv", default=".venv")
-    parser.add_argument("--cuda", choices=["auto", "cu126", "cu128", "cu130"], default="auto")
+    parser.add_argument("--cuda", choices=["auto", "cu126", "cu128", "cu130"], default="cu126",
+                        help="Default cu126 for H100/RTX 4070; auto optionally probes GPU generation")
     parser.add_argument("--torch-index-url", help="Override the PyTorch wheel index for your platform")
     parser.add_argument("--dev", action="store_true", help="Also install the test dependencies")
     parser.add_argument("--skip-gpu-check", action="store_true", help="Install on a login node without a GPU; check CUDA later inside the job")
@@ -36,6 +53,7 @@ def main():
         parser.error("ARM64 servers require a platform-specific PyTorch index; supply --torch-index-url")
     cuda = select_cuda() if args.cuda == "auto" else args.cuda
     index = args.torch_index_url or f"https://download.pytorch.org/whl/{cuda}"
+    torch_requirement = f"torch=={TORCH_VERSIONS[cuda]}" + (f"+{cuda}" if not args.torch_index_url else "")
     directory = Path(args.venv).expanduser()
     if not directory.is_absolute():
         directory = ROOT / directory
@@ -44,8 +62,9 @@ def main():
         subprocess.run([sys.executable, "-m", "venv", str(directory)], check=True)
     print(f"Installing runtime into {directory}; CUDA wheel family: {cuda}", flush=True)
     subprocess.run([str(python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
-    subprocess.run([str(python), "-m", "pip", "install", "--upgrade", "torch>=2.5", "--index-url", index], check=True)
-    requirement = ROOT / ("requirements-dev.txt" if args.dev else "requirements.txt")
+    subprocess.run([str(python), "-m", "pip", "install", "--upgrade", torch_requirement, "--index-url", index], check=True)
+    requirement = directory / "runtime-requirements.txt"
+    requirement.write_text(runtime_requirements(dev=args.dev), encoding="utf-8")
     subprocess.run([str(python), "-m", "pip", "install", "-r", str(requirement)], check=True)
     # Capture the actual package versions for reproducibility, without assuming
     # a Windows wheel lock can be installed on a different Linux architecture.

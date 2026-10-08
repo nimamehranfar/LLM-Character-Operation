@@ -21,6 +21,8 @@ Use a Hugging Face read token. Public models do not require login. Gated models 
 
 ## Submit jobs
 
+The requirements and setup script default to `torch==2.8.0+cu126` for the H100 cluster (Linux x86_64). `python -m pip install -r requirements.txt` selects this GPU build directly. Default setup does not require `nvidia-smi`; its Python GPU check runs inside your allocation, or can be deferred with `--skip-gpu-check`.
+
 The template requests one GPU, four CPU cores, 64 GB RAM and 24 hours. Adjust to your site's rules; add `--partition YOUR_PARTITION` and/or `--account YOUR_ACCOUNT` to `sbatch` if required. The full matrix may need more time; saved per-example progress allows recovery.
 
 ```bash
