@@ -7,6 +7,7 @@ import platform
 import time
 import threading
 import atexit
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,21 @@ from src.model.device import model_dtype, select_device
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + '.tmp')
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    os.replace(tmp, path)
+    # Each writer owns its temporary file; heartbeat and foreground saves must
+    # never rename or overwrite another writer's in-progress file.
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                     prefix=path.name + '.', suffix='.tmp', delete=False) as handle:
+        tmp = Path(handle.name)
+        try:
+            handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + '\n')
+        except BaseException:
+            handle.close()
+            tmp.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -74,6 +87,7 @@ class ResumeLedger:
         self.state['status'] = 'running'
         self._active_base = float(self.state.get('active_operational_seconds', 0.0) or 0.0)
         self._heartbeat_stop = threading.Event()
+        self._save_lock = threading.RLock()
         self._heartbeat_thread = None
         if self.enabled and self.heartbeat_seconds > 0:
             self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -94,9 +108,10 @@ class ResumeLedger:
     def _save(self) -> None:
         if not self.enabled:
             return
-        self.state['active_operational_seconds'] = self._active_now()
-        self.state['updated_at_unix'] = time.time()
-        _atomic_write(self.state_path, self.state)
+        with self._save_lock:
+            self.state['active_operational_seconds'] = self._active_now()
+            self.state['updated_at_unix'] = time.time()
+            _atomic_write(self.state_path, self.state)
 
     def record_setup(self, seconds: float) -> None:
         seconds = float(seconds)
@@ -150,8 +165,9 @@ class ResumeLedger:
         self._heartbeat_thread = None
 
     def snapshot(self) -> dict[str, Any]:
-        self._save()
-        return dict(self.state)
+        with self._save_lock:
+            self._save()
+            return dict(self.state)
 
 
 def inference_setup_metadata(*, model_repo_id: str, model_path: str | Path | None, quantization: str,
