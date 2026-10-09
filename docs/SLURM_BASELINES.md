@@ -153,6 +153,14 @@ Copy the printed ZIP from your workstation, replacing the account, hostname and 
 scp your_user@your_cluster:/absolute/path/to/printed-run.zip .
 ```
 
+Print accuracy percentages, completed counts, recorded run/generation time and peak VRAM for every model in a results directory:
+
+```bash
+.venv/bin/python scripts/summarize_baseline_run.py /absolute/path/to/printed-run-folder
+```
+
+The same standard-library script handles all configured model names and single/multi-GPU reports. It combines splits separately for each model, uses parallel wall time for multi-GPU runs, and shows missing measurements as `not recorded`. Times exclude parent downloads and queue time; VRAM is the highest per-GPU PyTorch peak, not summed GPU capacity.
+
 To recover, repeat the original command with `--resume-run /absolute/path/to/run-folder`. Validated completed splits are skipped; unfinished splits resume from saved progress. After a SLURM timeout, submit recovery as a new job. Use shared persistent scratch if the cache must survive allocation teardown. Changed code/data/config/settings require a new run folder.
 
 ## Cleanup behavior
