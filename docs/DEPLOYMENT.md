@@ -16,6 +16,17 @@ This produces `outputs/LLM-Character-Operation-portable.zip`. Extract it into a 
 
 ## Install
 
+Use Python 3.11 for the validated dependency stack. The default `torch==2.8.0+cu126` wheel supports Python 3.11–3.13 but not Python 3.14. A Conda `base` environment running Python 3.14 needs a separate Python 3.11 environment before bootstrap:
+
+```bash
+conda create -n llm-character python=3.11 pip -y
+conda activate llm-character
+python scripts/setup_environment.py --dev --skip-gpu-check
+source .venv/bin/activate
+```
+
+If an existing project `.venv` was created with Python 3.14, first move it to an unused backup path and let setup create a new one with Python 3.11.
+
 For SLURM jobs and clean baseline exports, see [SLURM_BASELINES.md](SLURM_BASELINES.md). Installation on a login node without a GPU supports `--skip-gpu-check`; verify CUDA later inside an allocation.
 
 Windows PowerShell, from the project directory:

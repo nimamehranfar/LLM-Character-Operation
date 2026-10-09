@@ -221,7 +221,8 @@ def test_login_node_setup_preserves_cuda_choice_and_defers_gpu_checks(monkeypatc
     assert "-r requirements.txt" not in dependencies
 
 
-def test_real_cpu_evaluator_exports_and_deletes_owned_fixture(monkeypatch, tmp_path):
+@pytest.mark.parametrize("batch_size", [1, 64])
+def test_real_cpu_evaluator_exports_and_deletes_owned_fixture(monkeypatch, tmp_path, batch_size):
     """Exercise actual tokenizer/model generation in a child with CUDA hidden.
 
     A tiny random model is a plumbing fixture, never a research baseline.
@@ -255,16 +256,68 @@ def test_real_cpu_evaluator_exports_and_deletes_owned_fixture(monkeypatch, tmp_p
         shutil.copytree(fixture, path)
         return path.resolve()
     monkeypatch.setattr(runner, "ensure_local_model_path", download)
-    monkeypatch.setattr(runner.sys, "argv", ["runner", "--models", "tiny", "--split", "test", "--examples", "1",
+    sample_args = ["--examples", "1"] if batch_size == 1 else ["--examples-per-operation", "5"]
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--models", "tiny", "--split", "both",
+                         *sample_args, "--batch-size", str(batch_size),
                          "--cleanup-models", "--model-cache-dir", str(tmp_path / "cache"),
                          "--results-dir", str(tmp_path / "results")])
     runner.main()
     run_dir = next(path for path in (tmp_path / "results").iterdir() if path.is_dir())
     report = json.loads((run_dir / "models/tiny/test.json").read_text())
-    assert report["example_count"] == 1
+    count = 1 if batch_size == 1 else 60
+    assert report["example_count"] == count
+    assert report["inference_setup"]["batch_size"] == batch_size
+    assert report["inference_setup"]["padding_side"] == "left"
+    assert {item["batch_size"] for item in report["per_example"]} == {count}
+    assert {item["batch_id"] for item in report["per_example"]} == {0}
+    first = report["per_example"][0]
+    assert report["runtime"]["generation_seconds"] == pytest.approx(first["batch_generation_seconds"])
+    assert report["runtime"]["inference_seconds"] == pytest.approx(first["batch_latency_seconds"])
+    assert report["runtime"]["examples_per_second"] == pytest.approx(count / first["batch_latency_seconds"])
+    assert json.loads((run_dir / "models/tiny/heldout.json").read_text())["example_count"] == count
+    if batch_size > 1:
+        assert len(report["by_operation"]) == 12
+        assert all(value["count"] == 5 for value in report["by_operation"].values())
     assert report["inference_setup"]["device"] == "cpu"
     assert report["inference_setup"]["dtype"] == "float32"
     assert report["runtime"]["peak_allocated_vram_mib"] == 0.0
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "success" and manifest["models"]["tiny"]["cache_deleted"] is True
     assert not (tmp_path / "cache" / manifest["run_id"] / "tiny").exists()
+
+
+def test_batch_handles_padding_and_early_eos():
+    from scripts.evaluate_direct import generate_batch
+
+    class Tokenizer:
+        chat_template = None
+        pad_token_id = 0
+        eos_token_id = 9
+
+        def __call__(self, prompts, **kwargs):
+            assert len(prompts) == 2 and kwargs["padding"] is True
+            return {"input_ids": torch.tensor([[0, 0, 4, 5], [1, 2, 3, 4]]),
+                    "attention_mask": torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])}
+
+        def decode(self, ids, **kwargs):
+            return " ".join(str(value) for value in ids if value not in (0, 9))
+
+    class Model:
+        device = torch.device("cpu")
+
+        def generate(self, **kwargs):
+            assert kwargs["input_ids"].shape == (2, 4)
+            assert kwargs["do_sample"] is False
+            return torch.tensor([[0, 0, 4, 5, 7, 9, 0], [1, 2, 3, 4, 6, 7, 9]])
+
+    examples = [SimpleNamespace(example_id=str(i), prompt="x", operation="COUNT_CHAR", category="test",
+                               source_style="test", generation_style="test", length_regime="short",
+                               result_kind="integer", expected=expected)
+                for i, expected in enumerate(("7", "6 7"))]
+    items = generate_batch(Model(), Tokenizer(), examples, device=torch.device("cpu"),
+                           max_new_tokens=3, batch_id=5)
+    assert [item["input_tokens"] for item in items] == [2, 4]
+    assert [item["output_tokens"] for item in items] == [2, 3]
+    assert all(item["exact"] for item in items)
+    assert sum(item["generation_seconds"] for item in items) == pytest.approx(items[0]["batch_generation_seconds"])
+    assert sum(item["latency_seconds"] for item in items) == pytest.approx(items[0]["batch_latency_seconds"])

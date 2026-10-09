@@ -1,4 +1,5 @@
 # Default GPU build for H100 and RTX 4070 (Linux/Windows x86_64).
+# Use Python 3.11 (tested); this PyTorch build has no Python 3.14 wheel.
 # The CUDA suffix prevents pip from selecting a CPU-only build.
 --extra-index-url https://download.pytorch.org/whl/cu126
 torch==2.8.0+cu126

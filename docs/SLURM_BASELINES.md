@@ -4,6 +4,17 @@ Run commands from the project root. These evaluate the original configured check
 
 ## Install and authenticate
 
+If the server's Conda `base` environment uses Python 3.14, create a Python 3.11 environment first. The pinned PyTorch 2.8.0 CUDA wheel does not support Python 3.14. Python 3.11 matches the locally tested dependency stack:
+
+```bash
+conda create -n llm-character python=3.11 pip -y
+conda activate llm-character
+python scripts/setup_environment.py --dev --skip-gpu-check
+source .venv/bin/activate
+```
+
+The bootstrap creates the project's `.venv` using this Python interpreter, as required by the included SLURM template. If `.venv` was previously created with Python 3.14, move it to an unused backup name before setup, for example `mv .venv .venv-python314-backup`; do not reuse that environment for this pin.
+
 Transfer the updated source or extract `outputs/LLM-Character-Operation-portable.zip` first. Uncommitted local changes do not transfer through `git pull`.
 
 ```bash
@@ -34,6 +45,9 @@ sbatch scripts/slurm_zero_shot.sbatch --split both --examples-per-operation -1 -
 
 # One model, full data.
 sbatch scripts/slurm_zero_shot.sbatch --models qwen3_4b --split both --cleanup-models
+
+# Batched H100 pilot: 5 prompts per operation = 60 per split, 120 total.
+sbatch scripts/slurm_zero_shot.sbatch --models qwen3_8b --split both --examples-per-operation 5 --batch-size 64 --auto-download
 
 # Several models with a persistent scratch cache parent.
 sbatch scripts/slurm_zero_shot.sbatch --models qwen3_8b qwen3_4b qwen2_5_7b --split heldout --cleanup-models --model-cache-dir /path/to/your/shared/scratch/hf-baselines
@@ -104,9 +118,12 @@ python scripts/run_zero_shot_matrix.py --list-models
 | `--resume` / `--no-resume` | Enable/disable per-example recovery; default enabled. A new invocation still creates a new folder. |
 | `--quantization 4bit` / `none` | Override quantization for all selected models. `none` needs more memory. |
 | `--max-new-tokens N` | Override generation limit; default config value is 192. |
+| `--batch-size N` | Positive maximum prompts per generation call; default config value or 1. With 60 prompts per split and size 64, actual batch size is 60. |
 | `--continue-on-error` / `--no-continue-on-error` | Continue after a model/split failure (default) / stop on first failure. |
 | `--matrix-config PATH` | Override matrix defaults. |
 | `--gpus auto` or visible indices | Optional replicas across allocated GPUs; omit for single-GPU SLURM jobs. |
+
+For batch sizes above 1, per-example timing is the batch wall time divided by its actual prompt count. The runtime totals therefore count each batch once; the average describes throughput cost per example, not individual response latency. Each row also records the actual batch size, batch ID, full batch latency and full batch generation time. Input-token counts exclude left padding, and output-token counts exclude padding after an answer's EOS. A memory failure is reported rather than silently reducing the requested batch size.
 
 Available model names:
 

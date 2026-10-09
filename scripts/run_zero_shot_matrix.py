@@ -62,6 +62,7 @@ def main() -> None:
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None, help="Enable per-example recovery inside --resume-run")
     parser.add_argument("--quantization", choices=["4bit", "none"], help="Override all selected configs; default = configured 4bit")
     parser.add_argument("--max-new-tokens", type=int, help="Override generation limit; config default is 192")
+    parser.add_argument("--batch-size", type=int, help="Prompts per generation call; default config value or 1")
     parser.add_argument("--gpus", help="Optional evaluation replicas on allocated visible GPUs: auto or 0,1; omit for one GPU")
     parser.add_argument("--continue-on-error", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
@@ -75,6 +76,8 @@ def main() -> None:
             parser.error(f"--{option.replace('_', '-')} must be positive or -1")
     if args.max_new_tokens is not None and args.max_new_tokens < 1:
         parser.error("--max-new-tokens must be positive")
+    if args.batch_size is not None and args.batch_size < 1:
+        parser.error("--batch-size must be positive")
 
     device = select_device(announce=True)
     matrix_path = resolve(args.matrix_config)
@@ -116,6 +119,8 @@ def main() -> None:
         "data": {path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else str(path): digest(path) for path in sorted(data_paths)},
         "source": {path.relative_to(REPO_ROOT).as_posix(): digest(path) for folder in ("scripts", "src") for path in sorted((REPO_ROOT / folder).rglob("*.py"))},
     }
+    if args.batch_size is not None:
+        protocol["batch_size_override"] = args.batch_size
     if args.resume_run:
         run_dir = resolve(args.resume_run)
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -219,6 +224,8 @@ def main() -> None:
                     command += ["--quantization", args.quantization]
                 if args.max_new_tokens:
                     command += ["--max-new-tokens", str(args.max_new_tokens)]
+                if args.batch_size is not None:
+                    command += ["--batch-size", str(args.batch_size)]
                 if args.gpus:
                     split_index = command.index("--split")
                     del command[split_index:split_index + 2]

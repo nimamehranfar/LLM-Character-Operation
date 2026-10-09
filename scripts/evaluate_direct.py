@@ -67,6 +67,45 @@ def stratified_sample(rows, examples: int, examples_per_operation: int, seed: in
     return rows
 
 
+@torch.inference_mode()
+def generate_batch(model, tokenizer, examples, *, device, max_new_tokens, batch_id):
+    """Generate together; allocate shared wall time once across completed rows."""
+    example_started = time.perf_counter()
+    prompts = [render_prompt(tokenizer, ex.prompt) for ex in examples]
+    inputs = tokenizer(prompts, return_tensors="pt", add_special_tokens=False, padding=True)
+    input_counts = inputs["attention_mask"].sum(dim=1).tolist()
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    synchronize(device)
+    started = time.perf_counter()
+    output = model.generate(
+        **inputs, max_new_tokens=max_new_tokens, do_sample=False, use_cache=True,
+        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
+    )
+    synchronize(device)
+    generation_seconds = time.perf_counter() - started
+    # Slice at the padded input width, then discard padding AFTER the first EOS.
+    # The EOS itself counts as a generated token, as in the single-prompt run.
+    generated_rows = output[:, inputs["input_ids"].shape[1]:].tolist()
+    decoded = []
+    for ids in generated_rows:
+        if tokenizer.eos_token_id is not None and tokenizer.eos_token_id in ids:
+            ids = ids[:ids.index(tokenizer.eos_token_id) + 1]
+        decoded.append((tokenizer.decode(ids, skip_special_tokens=True), len(ids)))
+    latency = time.perf_counter() - example_started
+    size = len(examples)
+    return [dict(
+        example_id=ex.example_id, operation=ex.operation, category=ex.category,
+        source_style=ex.source_style, generation_style=ex.generation_style,
+        length_regime=ex.length_regime, result_kind=ex.result_kind, expected=ex.expected,
+        generated=raw, normalized_answer=raw.strip(), exact=raw.strip() == ex.expected.strip(),
+        input_tokens=int(input_count), output_tokens=output_count,
+        total_tokens=int(input_count) + output_count,
+        latency_seconds=latency / size, generation_seconds=generation_seconds / size,
+        batch_id=batch_id, batch_size=size,
+        batch_latency_seconds=latency, batch_generation_seconds=generation_seconds,
+    ) for ex, input_count, (raw, output_count) in zip(examples, input_counts, decoded)]
+
+
 def load_model(cfg: dict, mode: str, *, auto_download: bool | None, cache_dir: str | None):
     device = select_device()
     dtype = model_dtype(device)
@@ -131,6 +170,7 @@ def main() -> None:
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--quantization", choices=["4bit", "none"], help="Override the model config")
     parser.add_argument("--max-new-tokens", type=int, help="Override the generation token limit")
+    parser.add_argument("--batch-size", type=int, help="Prompts generated simultaneously; default config value or 1")
     add_shard_arguments(parser)
     args = parser.parse_args()
     device = select_device(announce=True)
@@ -149,6 +189,9 @@ def main() -> None:
 
     data_cfg = cfg["data"]
     eval_cfg = cfg.get("evaluation", {})
+    batch_size = args.batch_size if args.batch_size is not None else int(eval_cfg.get("batch_size", 1))
+    if batch_size < 1:
+        parser.error("--batch-size must be positive")
     split = args.split or str(eval_cfg.get("split", "test"))
     split_path = data_cfg["test_file"] if split == "test" else eval_cfg.get("challenge_file", data_cfg.get("heldout_file"))
     if split_path is None:
@@ -183,54 +226,27 @@ def main() -> None:
     )
     ledger.record_setup(model_load_seconds)
 
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is None:
+            raise ValueError("Batched generation requires a tokenizer pad or EOS token")
+        tokenizer.pad_token = tokenizer.eos_token
+
     max_new_tokens = int(eval_cfg.get("max_new_tokens", 192))
+    pending = [ex for ex in rows if ex.example_id not in completed]
+    next_batch_id = max((int(item.get("batch_id", -1)) for item in completed.values()), default=-1) + 1
+    print(f"Batch size requested: {batch_size}; pending examples: {len(pending)}", flush=True)
     try:
-        for ex in tqdm(rows, desc=f"{args.mode} {split}", unit="ex", dynamic_ncols=True):
-            if ex.example_id in completed:
-                continue
-            example_started = time.perf_counter()
-            prompt = render_prompt(tokenizer, ex.prompt)
-            inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
-            input_tokens = int(inputs["input_ids"].numel())
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-            synchronize(device)
-            started = time.perf_counter()
-            output = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                use_cache=True,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-            synchronize(device)
-            generation_seconds = time.perf_counter() - started
-            generated_ids = output[0, inputs["input_ids"].shape[1]:]
-            output_tokens = int(generated_ids.numel())
-            raw = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            answer = raw.strip()
-            latency = time.perf_counter() - example_started
-            ok = answer == ex.expected.strip()
-            item = {
-                "example_id": ex.example_id,
-                "operation": ex.operation,
-                "category": ex.category,
-                "source_style": ex.source_style,
-                "generation_style": ex.generation_style,
-                "length_regime": ex.length_regime,
-                "result_kind": ex.result_kind,
-                "expected": ex.expected,
-                "generated": raw,
-                "normalized_answer": answer,
-                "exact": ok,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
-                "latency_seconds": latency,
-                "generation_seconds": generation_seconds,
-            }
-            ledger.append(item)
-            completed[ex.example_id] = item
+        with tqdm(total=len(pending), desc=f"{args.mode} {split}", unit="ex", dynamic_ncols=True) as progress:
+            for start in range(0, len(pending), batch_size):
+                batch = pending[start:start + batch_size]
+                items = generate_batch(model, tokenizer, batch, device=device,
+                                       max_new_tokens=max_new_tokens, batch_id=next_batch_id)
+                for item in items:
+                    ledger.append(item)
+                    completed[item["example_id"]] = item
+                next_batch_id += 1
+                progress.update(len(batch))
     except KeyboardInterrupt:
         ledger.mark_interrupted()
         print("Interrupted safely; rerun the same command to resume completed-example progress.")
@@ -275,6 +291,9 @@ def main() -> None:
     correct = sum(int(x["exact"]) for x in details)
     runtime = telemetry_summary(details, ledger_state)
     runtime.update({
+        "latency_semantics": "amortized_batch_wall_time" if batch_size > 1 else "single_prompt_wall_time",
+        "generation_seconds": sum(float(item.get("generation_seconds", 0.0)) for item in details),
+        "examples_per_second": len(details) / runtime["inference_seconds"] if runtime["inference_seconds"] else None,
         "cache_resolution_seconds_current_session": cache_resolution_seconds,
         "peak_allocated_vram_mib": torch.cuda.max_memory_allocated(device) / (1024 ** 2) if device.type == "cuda" else 0.0,
         "peak_reserved_vram_mib": torch.cuda.max_memory_reserved(device) / (1024 ** 2) if device.type == "cuda" else 0.0,
@@ -291,7 +310,9 @@ def main() -> None:
         "inference_setup": inference_setup_metadata(
             model_repo_id=cfg["model"]["repo_id"], model_path=model_path,
             quantization=str(cfg["model"].get("quantization", "4bit")), max_new_tokens=max_new_tokens,
-            extra={"auto_download": effective_auto, "model_cache_dir": effective_cache, "resume_enabled": resume},
+            batch_size=batch_size,
+            extra={"auto_download": effective_auto, "model_cache_dir": effective_cache, "resume_enabled": resume,
+                   "padding_side": tokenizer.padding_side},
         ),
         "runtime": runtime,
         **{name: convert(table) for name, table in tables.items()},
