@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import torch
 from torch import nn
@@ -337,10 +337,33 @@ class LayeredSymbolicResultMapper(nn.Module):
         encoded = self.result_norm(kind_embedding + value_embedding)
         return encoded + self.result_mlp(encoded)
 
+    def encode_symbols(self, symbols: Sequence[ResultSymbol], device: torch.device) -> torch.Tensor:
+        if not symbols:
+            raise ValueError("symbols must not be empty")
+        if any(symbol.kind not in ("integer", "character") for symbol in symbols):
+            raise ValueError("Unsupported result kind in batch")
+        kinds = torch.tensor([0 if symbol.kind == "integer" else 1 for symbol in symbols], device=device)
+        values = torch.tensor([symbol.value for symbol in symbols], device=device, dtype=torch.long)
+        embeddings = torch.zeros((len(symbols), self.result_dim), device=device)
+        for kind, bits, maximum, projection in (
+            (0, self.integer_bits, self.max_integer, self.integer_feature_projection),
+            (1, self.character_bits, self.ascii_vocab_size - 1, self.character_feature_projection),
+        ):
+            indices = [index for index, symbol in enumerate(symbols)
+                       if (symbol.kind == "integer") == (kind == 0)]
+            if indices:
+                selected = values[indices]
+                shifts = torch.arange(bits, device=device)
+                binary = ((selected[:, None] >> shifts) & 1).float()
+                normalized = selected.float()[:, None] / maximum if maximum > 0 else torch.zeros_like(selected[:, None]).float()
+                embeddings[indices] = projection(torch.cat((binary, normalized), dim=1))
+        encoded = self.result_norm(self.kind_embedding(kinds) + embeddings)
+        return encoded + self.result_mlp(encoded)
+
     def forward(
         self,
         hidden: torch.Tensor,
-        symbol: ResultSymbol,
+        symbol: ResultSymbol | Sequence[ResultSymbol],
         *,
         layer_index: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -349,9 +372,10 @@ class LayeredSymbolicResultMapper(nn.Module):
             raise ValueError(f"Layer {layer_index} is not in candidate_layers={self.candidate_layers}")
         if hidden.ndim != 2 or hidden.shape[-1] != self.hidden_size:
             raise ValueError(f"hidden must be [batch, {self.hidden_size}]")
-        if hidden.shape[0] != 1:
-            raise ValueError("Layered symbolic mapper currently supports batch_size=1 only")
-        result_repr = self.encode_symbol(symbol, hidden.device).float().unsqueeze(0)
+        symbols = [symbol] if isinstance(symbol, ResultSymbol) else list(symbol)
+        if len(symbols) != hidden.shape[0]:
+            raise ValueError(f"Received {len(symbols)} symbols for hidden batch {hidden.shape[0]}")
+        result_repr = self.encode_symbols(symbols, hidden.device).float()
         return self.adapters[str(layer_index)](hidden, result_repr)
 
 
@@ -364,17 +388,18 @@ class TrainableLayeredResultInjector:
         mapper: LayeredSymbolicResultMapper,
         *,
         layer_index: int,
-        symbol: ResultSymbol,
-        position_index: int,
+        symbol: ResultSymbol | Sequence[ResultSymbol],
+        position_index: int | Sequence[int],
         prefill_only: bool,
     ) -> None:
         self.model = model
         self.mapper = mapper
         self.layer_index = int(layer_index)
         self.symbol = symbol
-        self.position_index = int(position_index)
+        self.position_index = int(position_index) if isinstance(position_index, int) else [int(x) for x in position_index]
         self.prefill_only = bool(prefill_only)
         self.last_gate: float | None = None
+        self.last_gates: list[float] | None = None
         self._handle = None
         layers = self._layers()
         if not 0 <= self.layer_index < len(layers):
@@ -405,18 +430,21 @@ class TrainableLayeredResultInjector:
             raise TypeError("Expected hidden state [batch, seq, hidden]")
         if self.prefill_only and hidden.shape[1] <= 1:
             return output
-        position = self.position_index
-        if position < 0:
-            position = hidden.shape[1] + position
-        if not 0 <= position < hidden.shape[1]:
-            raise IndexError(
-                f"Injection position {self.position_index} is invalid for sequence length {hidden.shape[1]}."
-            )
-        current = hidden[:, position, :]
+        positions = ([self.position_index] * hidden.shape[0] if isinstance(self.position_index, int)
+                     else list(self.position_index))
+        if len(positions) != hidden.shape[0]:
+            raise ValueError(f"Received {len(positions)} positions for hidden batch {hidden.shape[0]}")
+        positions = [hidden.shape[1] + p if p < 0 else p for p in positions]
+        if any(not 0 <= p < hidden.shape[1] for p in positions):
+            raise IndexError(f"Injection positions {self.position_index} are invalid for length {hidden.shape[1]}")
+        rows = torch.arange(hidden.shape[0], device=hidden.device)
+        position_tensor = torch.tensor(positions, device=hidden.device, dtype=torch.long)
+        current = hidden[rows, position_tensor, :]
         updated, gate = self.mapper(current, self.symbol, layer_index=self.layer_index)
         self.last_gate = float(gate.detach().mean().item())
+        self.last_gates = gate.detach().float().flatten().cpu().tolist()
         new_hidden = hidden.clone()
-        new_hidden[:, position, :] = updated
+        new_hidden[rows, position_tensor, :] = updated
         return self._replace_hidden(output, new_hidden)
 
     def __enter__(self) -> "TrainableLayeredResultInjector":

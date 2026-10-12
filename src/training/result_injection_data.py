@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 import torch
 
+from src.training.batching import pad_training_sequences
+
 
 def render_answer_prompt(tokenizer: Any, prompt: str) -> str:
     messages = [{"role": "user", "content": prompt + "\nAnswer with only the final value."}]
@@ -49,3 +51,26 @@ def prepare_prompt_tensors(tokenizer: Any, prompt: str, device: torch.device) ->
     rendered = render_answer_prompt(tokenizer, prompt)
     encoded = tokenizer(rendered, return_tensors="pt")
     return {key: value.to(device) for key, value in encoded.items()}
+
+
+def prepare_training_batch(
+    tokenizer: Any,
+    examples: list[Any],
+    *,
+    max_sequence_length: int,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], list[int], int]:
+    """Tokenize and right-pad one mapper-training micro-batch."""
+    sequences = []
+    positions: list[int] = []
+    for example in examples:
+        tensors, position = prepare_training_tensors(
+            tokenizer, example.prompt, example.expected,
+            max_sequence_length=max_sequence_length, device=torch.device("cpu"),
+        )
+        sequences.append(tuple(tensors[key].squeeze(0).cpu() for key in ("input_ids", "attention_mask", "labels")))
+        positions.append(position)
+    batch, _, target_tokens = pad_training_sequences(
+        sequences, pad_token_id=int(tokenizer.pad_token_id), device=device
+    )
+    return batch, positions, target_tokens

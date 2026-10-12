@@ -15,6 +15,7 @@ results/
 logs/
 runs/
 outputs/
+graphify-out/
 
 # Optional local model/cache directories
 models/

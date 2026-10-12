@@ -22,6 +22,12 @@ ascii_vocab_size = 128
 gate_bias_init = -2.0
 
 [training]
+per_device_train_batch_size = 1
+gradient_accumulation_steps = 1
+optimizer = "adamw"
+lr_scheduler_type = "constant"
+warmup_ratio = 0.0
+group_by_length = true
 seed = 20260919
 epochs = 5
 learning_rate = 0.001
@@ -33,6 +39,8 @@ max_sequence_length = 512
 max_vram_mib = 7600
 
 [evaluation]
+batch_size = 1
+challenge_file = "data/character_operations_50k/heldout.jsonl"
 max_new_tokens = 128
 save_per_example = true
 run_layerwise_analysis = true
@@ -44,6 +52,7 @@ final_checkpoint = "checkpoints/qwen3_8b/result_injection/result_injector.pt"
 results_dir = "results/qwen3_8b/result_injection"
 
 [recovery]
+checkpoint_every_optimizer_steps = 25
 heartbeat_seconds = 15
 checkpoint_every_examples = 50
 

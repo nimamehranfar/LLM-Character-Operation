@@ -1,0 +1,63 @@
+# Evidence-informed QLoRA preset; see docs/FINAL_TRAINING.md.
+[model]
+repo_id = "Qwen/Qwen3-8B"
+quantization = "4bit"
+
+[data]
+train_file = "data/character_operations_50k/train.jsonl"
+dev_file = "data/character_operations_50k/dev.jsonl"
+test_file = "data/character_operations_50k/test.jsonl"
+train_examples = -1
+dev_examples = -1
+test_examples = -1
+function_mask_probability = 0.50
+
+[lora]
+r = 64
+alpha = 16
+dropout = 0.10
+gradient_checkpointing = true
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+[training]
+seed = 20260919
+epochs = 4
+optimizer = "paged_adamw_8bit"
+learning_rate = 0.0002
+weight_decay = 0.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 0.00000001
+per_device_train_batch_size = 4
+global_batch_size = 16
+gradient_accumulation_steps = 4
+gradient_clip_norm = 0.3
+lr_scheduler_type = "constant"
+warmup_ratio = 0.0
+group_by_length = true
+# Preserve the whole tool catalogue rather than truncating it at 512 tokens.
+max_sequence_length = 2048
+fail_on_truncation = true
+max_vram_mib = 0
+early_stopping_patience = 2
+min_delta = 0.0
+
+[evaluation]
+seed = 20260919
+batch_size = 16
+max_new_tokens = 192
+challenge_file = "data/character_operations_50k/heldout.jsonl"
+
+[output]
+checkpoint_dir = "checkpoints/qwen3_8b/tool_policy_final"
+adapter_dir = "checkpoints/qwen3_8b/tool_policy_final/final_adapter"
+results_dir = "results/qwen3_8b/tool_policy_final"
+
+[recovery]
+heartbeat_seconds = 15
+checkpoint_every_optimizer_steps = 25
+
+[cache]
+auto_download = true
+cache_dir = ""
+revision = "b968826d9c46dd6066d109eabc6255188de91218"

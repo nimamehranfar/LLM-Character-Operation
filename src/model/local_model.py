@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -170,11 +171,14 @@ def load_local_causal_lm(
     dtype = model_dtype(device)
     if quantization == "4bit" and device.type != "cuda":
         raise RuntimeError("4-bit evaluation requires CUDA; use quantization='none' for CPU fallback")
+    resolution_started = time.perf_counter()
     model_path = ensure_local_model_path(
         repo_id, explicit_path, auto_download=auto_download, cache_dir=cache_dir, revision=revision
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    resolution_seconds = time.perf_counter() - resolution_started
+    loading_started = time.perf_counter()
 
     model_kwargs: dict[str, object] = {
         "device_map": {"": device},
@@ -193,5 +197,8 @@ def load_local_causal_lm(
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
+
+    model.training_setup_timing = {"cache_resolution_download_and_tokenizer_seconds_current_session": resolution_seconds,
+                                   "model_loading_seconds_current_session": time.perf_counter() - loading_started}
 
     return model_path, tokenizer, model

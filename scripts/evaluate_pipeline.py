@@ -63,7 +63,7 @@ def answer_prompt(tok, user: str) -> str:
 
 @torch.no_grad()
 def policy_generate(model, tok, ex, cfg):
-    r = render_tool_policy_example(ex, seed=int(cfg['training']['seed']), epoch=0,
+    r = render_tool_policy_example(ex, seed=int(cfg.get('evaluation', {}).get('seed', cfg['training']['seed'])), epoch=0,
                                    mask_probability=float(cfg['data']['function_mask_probability']))
     p = chat(tok, r.system_prompt, r.user_prompt)
     inp = tok(p, return_tensors='pt', add_special_tokens=False)

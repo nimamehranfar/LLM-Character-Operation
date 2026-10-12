@@ -178,7 +178,8 @@ def main():
     interface = cfg["model"]["tool_interface"]
     if policy_cfg and interface != "qwen":
         parser.error("The project's trained policy is supported only with its Qwen backbone")
-    seed = int(policy_cfg["training"]["seed"] if policy_cfg else cfg["training"]["seed"])
+    seed_cfg = policy_cfg if policy_cfg else cfg
+    seed = int(seed_cfg.get("evaluation", {}).get("seed", seed_cfg["training"]["seed"]))
     default_mask = float(policy_cfg["data"]["function_mask_probability"] if policy_cfg else 0.0)
     mask_probability = default_mask if args.mask_probability is None else args.mask_probability
     if not 0 <= mask_probability <= 1:

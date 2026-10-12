@@ -24,6 +24,11 @@ epochs = 4
 learning_rate = 0.0002
 weight_decay = 0.01
 gradient_accumulation_steps = 16
+per_device_train_batch_size = 1
+optimizer = "paged_adamw_8bit"
+lr_scheduler_type = "constant"
+warmup_ratio = 0.0
+group_by_length = true
 gradient_clip_norm = 1.0
 max_sequence_length = 512
 max_vram_mib = 7600
@@ -31,6 +36,7 @@ early_stopping_patience = 2
 min_delta = 0.002
 
 [evaluation]
+batch_size = 1
 split = "both"
 resume = true
 max_new_tokens = 192
@@ -42,6 +48,7 @@ adapter_dir = "checkpoints/qwen3_8b/tool_policy/final_adapter"
 results_dir = "results/qwen3_8b/tool_policy"
 
 [recovery]
+checkpoint_every_optimizer_steps = 25
 heartbeat_seconds = 15
 checkpoint_every_examples = 50
 

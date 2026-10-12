@@ -262,6 +262,9 @@ Primary Qwen snapshot revisions are pinned in config so a fresh cache resolves t
 
 ## Local baseline matrix notes
 
+For both training stages on one GPU, effective batch controls, paper figures, recovery,
+and server pull/run commands, see [Final training](docs/FINAL_TRAINING.md).
+
 See [SLURM and clean baseline commands](docs/SLURM_BASELINES.md) for one-GPU jobs, all 13 configured models, model selection, automatic downloads and optional cleanup. Each invocation creates a unique result folder, CSV summary and ZIP. Incomplete matrices exit with code 1. Use `--resume-run <folder>` with matching evaluation options to recover a specific run.
 
 Install the full runtime requirements before evaluating the heterogeneous comparison models:

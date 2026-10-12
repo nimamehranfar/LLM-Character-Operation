@@ -34,6 +34,9 @@ from src.data.tool_policy_dataset import (
 from src.data.character_dataset import load_jsonl, random_take
 from src.model.local_model import ensure_local_model_path
 from src.model.device import select_device
+from src.training.batching import pad_training_sequences
+from src.training.engine import add_training_arguments, apply_training_arguments, train_single_gpu
+from src.training.reporting import export_training_artifacts, run_manifest
 from src.training.low_vram_qlora import prepare_4bit_lora_base_low_vram
 from src.training.recovery import (
     GracefulStop,
@@ -42,7 +45,7 @@ from src.training.recovery import (
     restore_rng_state,
 )
 
-SCRIPT_VERSION = "tool_policy_sft"
+SCRIPT_VERSION = "tool_policy_sft_v2_batched"
 
 
 def console(message: str) -> None:
@@ -100,7 +103,7 @@ def chat_prompt(tokenizer, system_prompt: str, user_prompt: str) -> str:
         return tokenizer.apply_chat_template(messages, **kwargs)
 
 
-def encode_training_example(tokenizer, rendered, max_length: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def encode_training_example(tokenizer, rendered, max_length: int, *, fail_on_truncation: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     prompt_text = chat_prompt(tokenizer, rendered.system_prompt, rendered.user_prompt)
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False).input_ids
     target_ids = tokenizer(rendered.target, add_special_tokens=False).input_ids
@@ -109,6 +112,9 @@ def encode_training_example(tokenizer, rendered, max_length: int) -> tuple[torch
         target_ids = target_ids + [eos]
     total = len(prompt_ids) + len(target_ids)
     if total > max_length:
+        if fail_on_truncation:
+            raise ValueError(f"Sequence has {total} tokens; max_sequence_length={max_length}. "
+                             "Increase the configured maximum to retain the complete tool catalogue.")
         overflow = total - max_length
         # Keep every target token and the end of the prompt, which contains the user query.
         if overflow >= len(prompt_ids):
@@ -133,12 +139,15 @@ def load_model_and_tokenizer(
     cache_cfg = cfg.get("cache", {})
     effective_auto = bool(cache_cfg.get("auto_download", False)) if auto_download is None else bool(auto_download)
     effective_cache = cache_cfg.get("cache_dir") if cache_dir is None else cache_dir
+    resolve_started = time.perf_counter()
     model_path = ensure_local_model_path(
         model_cfg["repo_id"], model_cfg.get("local_path"),
         auto_download=effective_auto, cache_dir=effective_cache,
         revision=str(cache_cfg.get("revision", "main")),
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    resolution_seconds = time.perf_counter() - resolve_started
+    load_started = time.perf_counter()
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     quant = BitsAndBytesConfig(
@@ -172,6 +181,8 @@ def load_model_and_tokenizer(
     if adapter_state is not None:
         set_peft_model_state_dict(model, adapter_state)
     model.train()
+    model.training_setup_timing = {"cache_resolution_download_and_tokenizer_seconds_current_session": resolution_seconds,
+                                   "model_and_adapter_loading_seconds_current_session": time.perf_counter() - load_started}
     return model_path, tokenizer, model
 
 
@@ -204,67 +215,88 @@ def generate_policy(model, tokenizer, rendered, max_new_tokens: int) -> str:
 
 
 @torch.no_grad()
-def evaluate_policy(model, tokenizer, examples, cfg: dict[str, Any], *, seed: int, epoch: int) -> dict[str, float]:
-    max_examples = int(cfg["evaluation"].get("dev_examples", len(examples)))
-    selected = random_take(examples, max_examples, seed + 97)
-    total = controls = tasks = valid = decision_correct = op_correct = args_correct = full_exact = 0
-    masked_total = masked_exact = 0
-    unmasked_total = unmasked_exact = 0
-    bar = tqdm(selected, desc=f"dev e{epoch}", unit="ex", dynamic_ncols=True, leave=False)
-    for example in bar:
-        rendered = render_tool_policy_example(
-            example,
-            seed=seed,
-            epoch=0,
-            mask_probability=float(cfg["data"]["function_mask_probability"]),
-        )
-        text = generate_policy(model, tokenizer, rendered, int(cfg["evaluation"]["max_new_tokens"]))
-        parsed = parse_policy_output(text, rendered.tool_id_to_operation)
-        total += 1
-        valid += int(bool(parsed["valid"]))
-        expected_decision = "NO_CALL" if example.operation == "NONE" else "CALL"
-        decision_correct += int(parsed["decision"] == expected_decision)
-        exact = call_is_exact(parsed, example)
-        full_exact += int(exact)
-        if rendered.masked_names:
-            masked_total += 1
-            masked_exact += int(exact)
-        else:
-            unmasked_total += 1
-            unmasked_exact += int(exact)
-        if example.operation == "NONE":
-            controls += 1
-        else:
-            tasks += 1
-            op_correct += int(parsed.get("operation") == example.operation)
-            expected_args = {str(k): str(v) for k, v in example.arguments.items()}
-            args_correct += int(dict(parsed.get("arguments", {})) == expected_args)
-        bar.set_postfix(exact=f"{full_exact/max(1,total):.3f}", decision=f"{decision_correct/max(1,total):.3f}")
+def evaluate_policy(model, tokenizer, examples, cfg: dict[str, Any], *, seed: int, epoch: int) -> dict[str, Any]:
+    from src.evaluation.training_metrics import grouped_accuracy, inference_runtime, token_count_to_eos, wilson_interval
+    seed = int(cfg["evaluation"].get("seed", seed))
+    selected = random_take(examples, int(cfg["evaluation"].get("dev_examples", len(examples))), seed + 97)
+    batch_size = int(cfg["evaluation"].get("batch_size", 1))
+    if batch_size < 1:
+        raise ValueError("evaluation.batch_size must be positive")
+    details, batches = [], []
+    original_padding, was_training = tokenizer.padding_side, model.training
+    tokenizer.padding_side = "left"
+    model.eval()
+    try:
+        for start in tqdm(range(0, len(selected), batch_size), desc=f"policy evaluation e{epoch}", unit="batch"):
+            examples_batch = selected[start:start + batch_size]
+            rendered = [render_tool_policy_example(
+                ex, seed=seed, epoch=0, mask_probability=float(cfg["data"]["function_mask_probability"]))
+                for ex in examples_batch]
+            prompts = [chat_prompt(tokenizer, row.system_prompt, row.user_prompt) for row in rendered]
+            tensors = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False)
+            tensors = {key: value.to(model.device) for key, value in tensors.items()}
+            torch.cuda.synchronize(model.device)
+            tick = time.perf_counter()
+            output = model.generate(**tensors, max_new_tokens=int(cfg["evaluation"]["max_new_tokens"]),
+                                    do_sample=False, use_cache=True, pad_token_id=tokenizer.pad_token_id,
+                                    eos_token_id=tokenizer.eos_token_id)
+            torch.cuda.synchronize(model.device)
+            elapsed = time.perf_counter() - tick
+            batch_id = len(batches)
+            batches.append({"batch_id": batch_id, "example_count": len(examples_batch), "generation_seconds": elapsed})
+            suffix = output[:, tensors["input_ids"].shape[1]:]
+            texts = tokenizer.batch_decode(suffix, skip_special_tokens=True)
+            for index, (ex, render, text) in enumerate(zip(examples_batch, rendered, texts)):
+                parsed = parse_policy_output(text, render.tool_id_to_operation)
+                expected_decision = "NO_CALL" if ex.is_control else "CALL"
+                details.append({
+                    "example_id": ex.example_id, "operation": ex.operation, "category": ex.category,
+                    "source_style": ex.source_style, "length_regime": ex.length_regime,
+                    "template_family": ex.template_family, "masked_names": render.masked_names,
+                    "generated": text, "parsed": parsed, "expected": render.target,
+                    "valid": bool(parsed["valid"]), "decision_correct": parsed["decision"] == expected_decision,
+                    "operation_correct": parsed.get("operation") == ex.operation,
+                    "arguments_correct": dict(parsed.get("arguments", {})) == {str(k): str(v) for k, v in ex.arguments.items()},
+                    "correct": call_is_exact(parsed, ex), "batch_id": batch_id,
+                    "input_tokens": int(tensors["attention_mask"][index].sum()),
+                    "output_tokens": token_count_to_eos(suffix[index], tokenizer.eos_token_id),
+                    "generation_seconds": elapsed / len(examples_batch),
+                })
+    finally:
+        tokenizer.padding_side = original_padding
+        model.train(was_training)
+    tasks = [row for row in details if row["operation"] != "NONE"]
+    masked = [row for row in details if row["masked_names"]]
+    unmasked = [row for row in details if not row["masked_names"]]
+    mean = lambda rows, key: sum(bool(row[key]) for row in rows) / max(1, len(rows))
+    correct = sum(bool(row["correct"]) for row in details)
     return {
-        "example_count": total,
-        "valid_output_accuracy": valid / max(1, total),
-        "decision_accuracy": decision_correct / max(1, total),
-        "operation_accuracy_on_tasks": op_correct / max(1, tasks),
-        "argument_exact_on_tasks": args_correct / max(1, tasks),
-        "full_call_exact_accuracy": full_exact / max(1, total),
-        "masked_full_exact": masked_exact / max(1, masked_total),
-        "unmasked_full_exact": unmasked_exact / max(1, unmasked_total),
+        "example_count": len(details), "correct_count": correct,
+        "valid_output_accuracy": mean(details, "valid"), "decision_accuracy": mean(details, "decision_correct"),
+        "operation_accuracy_on_tasks": mean(tasks, "operation_correct"),
+        "argument_exact_on_tasks": mean(tasks, "arguments_correct"),
+        "full_call_exact_accuracy": mean(details, "correct"),
+        "full_call_exact_ci95_wilson": wilson_interval(correct, len(details)),
+        "masked_full_exact": mean(masked, "correct"), "unmasked_full_exact": mean(unmasked, "correct"),
+        **grouped_accuracy(details), "runtime": inference_runtime(details, batches),
+        "per_example": details,
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the structured character-operation tool policy.")
+    parser = argparse.ArgumentParser(description="Train the structured character-operation tool policy on one GPU.")
     parser.add_argument("--config", default=str(REPO_ROOT / "configs/experiments/qwen3_8b/tool_policy.toml"))
     parser.add_argument("--auto-download", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--model-cache-dir", default=None)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--status", action="store_true")
-    parser.add_argument("--max-vram-mib", type=int, help="Override the memory ceiling; 0 uses the whole visible GPU")
+    parser.add_argument("--max-vram-mib", type=int)
+    add_training_arguments(parser)
     args = parser.parse_args()
-
     cfg_path = Path(args.config).resolve()
     cfg = load_config(cfg_path)
+    apply_training_arguments(cfg, args)
     if args.max_vram_mib is not None:
         cfg["training"]["max_vram_mib"] = args.max_vram_mib
     seed = int(cfg["training"]["seed"])
@@ -274,198 +306,134 @@ def main() -> None:
         RecoveryManager.print_status(checkpoint_root=checkpoint_root, config=cfg, script_version=SCRIPT_VERSION)
         return
     manager = RecoveryManager.create_or_resume(
-        checkpoint_root=checkpoint_root,
-        config=cfg,
-        config_path=str(cfg_path),
-        script_version=SCRIPT_VERSION,
-        heartbeat_seconds=float(cfg["recovery"]["heartbeat_seconds"]),
-        fresh=bool(args.fresh),
+        checkpoint_root=checkpoint_root, config=cfg, config_path=str(cfg_path), script_version=SCRIPT_VERSION,
+        heartbeat_seconds=float(cfg["recovery"]["heartbeat_seconds"]), fresh=bool(args.fresh),
         explicit_run_dir=Path(args.run_dir).resolve() if args.run_dir else None,
     )
     try:
         configure_vram_limit(int(cfg["training"]["max_vram_mib"]))
-        train_rows = load_jsonl(resolve_path(cfg["data"]["train_file"]))
-        dev_rows = load_jsonl(resolve_path(cfg["data"]["dev_file"]))
-        train_rows = random_take(train_rows, int(cfg["data"]["train_examples"]), seed)
-        dev_rows = random_take(dev_rows, int(cfg["data"]["dev_examples"]), seed + 1)
+        train_path = resolve_path(cfg["data"]["train_file"])
+        dev_path = resolve_path(cfg["data"]["dev_file"])
+        test_path = resolve_path(cfg["data"]["test_file"])
+        heldout_path = resolve_path(cfg["evaluation"]["challenge_file"])
+        train_rows = random_take(load_jsonl(train_path), int(cfg["data"]["train_examples"]), seed)
+        dev_rows = random_take(load_jsonl(dev_path), int(cfg["data"]["dev_examples"]), seed + 1)
         latest = manager.load_checkpoint("policy_latest.pt")
-        adapter_state = latest.get("adapter_state_dict") if latest else None
-        model_path, tokenizer, model = load_model_and_tokenizer(cfg, adapter_state, auto_download=args.auto_download, cache_dir=args.model_cache_dir)
+        loading_started = time.perf_counter()
+        model_path, tokenizer, model = load_model_and_tokenizer(
+            cfg, None, auto_download=args.auto_download, cache_dir=args.model_cache_dir)
+        loading_seconds = time.perf_counter() - loading_started
         params = trainable_parameters(model)
-        trainable_count = sum(p.numel() for p in params)
-        console(f"Qwen path: {model_path}")
-        console(f"Trainable LoRA parameters: {trainable_count:,}")
-        console(f"Train={len(train_rows):,}; dev={len(dev_rows):,}; result injection is trained separately.")
-
-        try:
+        tr = cfg["training"]
+        # Explicit optimizer selection avoids silently changing the paper protocol.
+        optimizer_name = str(tr.get("optimizer", "paged_adamw_8bit"))
+        optimizer_kwargs = dict(lr=float(tr["learning_rate"]), weight_decay=float(tr["weight_decay"]),
+                                betas=(float(tr.get("adam_beta1", .9)), float(tr.get("adam_beta2", .999))),
+                                eps=float(tr.get("adam_epsilon", 1e-8)))
+        if optimizer_name == "paged_adamw_8bit":
             import bitsandbytes as bnb
-            optimizer = bnb.optim.PagedAdamW8bit(params, lr=float(cfg["training"]["learning_rate"]), weight_decay=float(cfg["training"]["weight_decay"]))
-        except Exception:
-            optimizer = torch.optim.AdamW(params, lr=float(cfg["training"]["learning_rate"]), weight_decay=float(cfg["training"]["weight_decay"]))
-
-        epochs = int(cfg["training"]["epochs"])
-        grad_accum = int(cfg["training"]["gradient_accumulation_steps"])
-        max_length = int(cfg["training"]["max_sequence_length"])
-        save_every = int(cfg["recovery"]["checkpoint_every_examples"])
-        patience = int(cfg["training"]["early_stopping_patience"])
-        min_delta = float(cfg["training"]["min_delta"])
-
-        if latest:
-            optimizer.load_state_dict(latest["optimizer_state_dict"])
-            for state in optimizer.state.values():
-                for key, value in list(state.items()):
-                    if torch.is_tensor(value):
-                        state[key] = value.to(model.device)
-            restore_rng_state(latest.get("rng_state", {}))
-            epoch = int(latest["epoch"])
-            cursor = int(latest["cursor"])
-            order = list(latest["order"])
-            loss_sum = float(latest.get("loss_sum", 0.0))
-            loss_count = int(latest.get("loss_count", 0))
-            epoch_active_seconds = float(latest.get("epoch_active_seconds", 0.0))
-            best_metric = float(latest.get("best_metric", -1.0))
-            best_epoch = int(latest.get("best_epoch", 0))
-            stale = int(latest.get("stale", 0))
-            history = list(latest.get("history", []))
-            console(f"Resuming epoch {epoch} at example {cursor}/{len(order)}")
+            optimizer = bnb.optim.PagedAdamW8bit(params, **optimizer_kwargs)
+        elif optimizer_name == "adamw":
+            optimizer = torch.optim.AdamW(params, **optimizer_kwargs)
         else:
-            epoch, cursor, order = 1, 0, []
-            loss_sum, loss_count, epoch_active_seconds = 0.0, 0, 0.0
-            best_metric, best_epoch, stale, history = -1.0, 0, 0, []
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+        maximum = int(tr["max_sequence_length"])
 
-        segment_start = time.perf_counter()
+        def encode(index, epoch):
+            rendered = render_tool_policy_example(
+                train_rows[index], seed=seed, epoch=epoch,
+                mask_probability=float(cfg["data"]["function_mask_probability"]))
+            return encode_training_example(tokenizer, rendered, maximum,
+                                           fail_on_truncation=bool(tr.get("fail_on_truncation", False)))
 
-        def current_epoch_active() -> float:
-            return epoch_active_seconds + (time.perf_counter() - segment_start)
+        lengths = [encode(i, 1)[0].numel() for i in range(len(train_rows))]
+        # Rendering varies deterministically by epoch. The engine's epoch is
+        # available through the recovery state updated at optimizer boundaries.
+        current_epoch = [int(latest.get("loop", {}).get("epoch", 1)) if latest else 1]
 
-        def save_latest() -> None:
-            nonlocal segment_start, epoch_active_seconds
-            epoch_active_seconds = current_epoch_active()
-            segment_start = time.perf_counter()
-            manager.checkpoint("policy_latest.pt", {
-                "adapter_state_dict": adapter_state_cpu(model),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "rng_state": capture_rng_state(),
-                "epoch": epoch,
-                "cursor": cursor,
-                "order": order,
-                "loss_sum": loss_sum,
-                "loss_count": loss_count,
-                "epoch_active_seconds": epoch_active_seconds,
-                "best_metric": best_metric,
-                "best_epoch": best_epoch,
-                "stale": stale,
-                "history": history,
-            })
+        def prepare(indices):
+            sequences = [encode(i, current_epoch[0]) for i in indices]
+            tensors, _, target_tokens = pad_training_sequences(
+                sequences, pad_token_id=int(tokenizer.pad_token_id), device=torch.device("cpu"))
+            return {"tensors": tensors, "target_tokens": target_tokens, "count": len(indices)}
 
-        manager.set_emergency_saver(save_latest)
-        while epoch <= epochs:
-            if not order:
-                order = list(range(len(train_rows)))
-                random.Random(seed + epoch * 1009).shuffle(order)
-            bar = tqdm(total=len(order), initial=cursor, desc=f"tool-policy SFT epoch {epoch}/{epochs}", unit="ex", dynamic_ncols=True)
-            model.train()
-            optimizer.zero_grad(set_to_none=True)
-            accum = 0
-            while cursor < len(order):
-                idx = order[cursor]
-                example = train_rows[idx]
-                rendered = render_tool_policy_example(
-                    example,
-                    seed=seed,
-                    epoch=epoch,
-                    mask_probability=float(cfg["data"]["function_mask_probability"]),
-                )
-                ids, mask, labels = encode_training_example(tokenizer, rendered, max_length)
-                ids = ids.to(model.device)
-                mask = mask.to(model.device)
-                labels = labels.to(model.device)
-                out = model(input_ids=ids, attention_mask=mask, labels=labels, use_cache=False)
-                loss = out.loss / grad_accum
-                loss.backward()
-                raw_loss = float(out.loss.detach().item())
-                loss_sum += raw_loss
-                loss_count += 1
-                accum += 1
-                cursor += 1
-                if accum >= grad_accum or cursor == len(order):
-                    torch.nn.utils.clip_grad_norm_(params, float(cfg["training"]["gradient_clip_norm"]))
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    accum = 0
-                bar.update(1)
-                bar.set_postfix(loss=f"{loss_sum/max(1,loss_count):.4f}")
-                if cursor % save_every == 0:
-                    save_latest()
-                    manager.progress(phase="policy_sft", stage="training", epoch=epoch, cursor=cursor, total=len(order), latest_checkpoint=str(manager.paths.checkpoints / "policy_latest.pt"))
-                    manager.check_stop(saver=save_latest)
-            bar.close()
-            epoch_train_seconds = current_epoch_active()
-            epoch_active_seconds = 0.0
-            segment_start = time.perf_counter()
-            dev_metrics = evaluate_policy(model, tokenizer, dev_rows, cfg, seed=seed, epoch=epoch)
-            metric = float(dev_metrics["full_call_exact_accuracy"])
-            improved = metric > best_metric + min_delta
-            if improved:
-                best_metric = metric
-                best_epoch = epoch
-                stale = 0
-                manager.checkpoint("policy_best.pt", {"adapter_state_dict": adapter_state_cpu(model), "epoch": epoch, "dev_metrics": dev_metrics})
-            else:
-                stale += 1
-            history.append({
-                "epoch": epoch,
-                "mean_loss": loss_sum / max(1, loss_count),
-                "epoch_train_active_seconds": epoch_train_seconds,
-                "dev": dev_metrics,
-                "best": improved,
-            })
-            epoch_times = [float(x["epoch_train_active_seconds"]) for x in history]
-            typical = statistics.median(epoch_times[-5:])
-            remaining = max(0, min(epochs - epoch, patience - stale)) * typical
-            console(
-                f"epoch {epoch}: loss={history[-1]['mean_loss']:.4f}; dev exact={metric:.4f}; "
-                f"decision={dev_metrics['decision_accuracy']:.4f}; active epoch={human_duration(epoch_train_seconds)}; "
-                f"active run={human_duration(manager.active_elapsed_seconds())}; estimated remaining={human_duration(remaining)}"
-            )
-            epoch += 1
-            cursor = 0
-            order = []
-            loss_sum = 0.0
-            loss_count = 0
-            save_latest()
-            if stale >= patience:
-                console(f"Early stopping after {stale} stale epochs; best epoch={best_epoch}, exact={best_metric:.4f}")
-                break
+        def forward(batch, micro_step):
+            tensors = {key: value.to(model.device) for key, value in batch["tensors"].items()}
+            out = model(**tensors, use_cache=False)
+            return out.loss, batch["target_tokens"], int(tensors["attention_mask"].sum()), batch["count"], {}
 
-        best = manager.load_checkpoint("policy_best.pt")
-        if best is None:
-            raise RuntimeError("No best policy checkpoint")
-        set_peft_model_state_dict(model, best["adapter_state_dict"])
-        out_dir = resolve_path(cfg["output"]["adapter_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
+        def validate():
+            from src.training.engine import teacher_forced_loss
+            metrics = evaluate_policy(model, tokenizer, dev_rows, cfg, seed=seed, epoch=current_epoch[0])
+            was_training = model.training
+            model.eval()
+            def dev_batches():
+                size = int(cfg["evaluation"].get("batch_size", 1))
+                for start in range(0, len(dev_rows), size):
+                    sequences = [encode_training_example(tokenizer, render_tool_policy_example(
+                        ex, seed=int(cfg["evaluation"].get("seed", seed)), epoch=0,
+                        mask_probability=float(cfg["data"]["function_mask_probability"])),
+                        maximum, fail_on_truncation=bool(tr.get("fail_on_truncation", False)))
+                        for ex in dev_rows[start:start + size]]
+                    yield pad_training_sequences(sequences, pad_token_id=int(tokenizer.pad_token_id),
+                                                 device=torch.device("cpu"))[0]
+            metrics["loss"] = teacher_forced_loss(model, dev_batches(), model.device)
+            model.train(was_training)
+            current_epoch[0] += 1
+            return metrics
+
+        trained = train_single_gpu(
+            module=model, optimizer=optimizer, manager=manager, cfg=cfg, rows=train_rows, lengths=lengths,
+            prepare=prepare, forward=forward, evaluate=validate, state_cpu=lambda: adapter_state_cpu(model),
+            restore=lambda state: set_peft_model_state_dict(model, state),
+            checkpoint_prefix="policy", latest=latest, metric_key="full_call_exact_accuracy")
+        final_started = time.perf_counter()
+        final_metrics = {}
+        for split, path in (("test", test_path), ("heldout", heldout_path)):
+            final_metrics[split] = evaluate_policy(model, tokenizer, load_jsonl(path), cfg, seed=seed, epoch=0)
+        final_evaluation_seconds = time.perf_counter() - final_started
+        # Each run owns immutable exported weights; compatibility path remains
+        # available for the existing pipeline configuration.
+        out_dir = manager.paths.artifacts / "final_adapter"
         model.save_pretrained(out_dir, safe_serialization=True)
         tokenizer.save_pretrained(out_dir)
+        compatibility = resolve_path(cfg["output"]["adapter_dir"])
+        model.save_pretrained(compatibility, safe_serialization=True)
+        tokenizer.save_pretrained(compatibility)
+        manifest = run_manifest(
+            config_path=cfg_path, data_paths=[train_path, dev_path, test_path, heldout_path],
+            training={**tr, "batch_plan": trained["batch_plan"], "lora": cfg["lora"],
+                      "evaluation": cfg["evaluation"], "model": cfg["model"], "cache": cfg.get("cache", {})},
+            trainable_parameters=sum(p.numel() for p in params),
+            total_parameters=model.num_parameters())
         report = {
-            "experiment": SCRIPT_VERSION,
-            "status": "complete",
-            "model": cfg["model"]["repo_id"],
-            "model_path": str(model_path),
-            "trainable_lora_parameters": trainable_count,
-            "best_epoch": int(best["epoch"]),
-            "best_dev": best["dev_metrics"],
-            "history": history,
-            "adapter_dir": str(out_dir),
-            "recovery_run_dir": str(manager.paths.run_dir),
-            "phase2_trained": False,
-            "phase2_note": "Result injection is trained separately after tool-policy evaluation.",
+            "experiment": SCRIPT_VERSION, "status": "complete", "model": cfg["model"]["repo_id"],
+            "model_path": str(model_path), "batch_plan": trained["batch_plan"],
+            "train_count": len(train_rows), "dev_count": len(dev_rows),
+            "best_epoch": trained["best"]["epoch"], "best_dev": trained["best"]["metrics"],
+            **final_metrics, "history": trained["history"], "optimizer_steps": trained["optimizer_steps"],
+            "runtime": {"resolve_download_and_model_loading_seconds": loading_seconds,
+                        **model.training_setup_timing,
+                        "batch_preparation_seconds": trained["batch_preparation_seconds"],
+                        "train_loop_wall_seconds_current_session": trained["train_loop_wall_seconds_current_session"],
+                        "training_seconds": trained["training_seconds"],
+                        "validation_seconds": trained["validation_seconds"],
+                        "checkpoint_seconds": trained["checkpoint_seconds"],
+                        "final_evaluation_seconds": final_evaluation_seconds,
+                        "active_total_seconds": manager.active_elapsed_seconds(),
+                        "wall_total_seconds_including_interruptions": manager.wall_elapsed_seconds(),
+                        "peak_allocated_vram_mib": max(trained["peak_allocated_vram_mib"], torch.cuda.max_memory_allocated() / 1024**2),
+                        "peak_reserved_vram_mib": max(trained["peak_reserved_vram_mib"], torch.cuda.max_memory_reserved() / 1024**2)},
+            "adapter_dir": str(out_dir), "compatibility_adapter_dir": str(compatibility),
+            "recovery_run_dir": str(manager.paths.run_dir), "phase2_trained": False,
         }
+        export_training_artifacts(manager.paths.artifacts, step_rows=trained["step_rows"],
+                                  epoch_rows=trained["history"], manifest=manifest, report=report)
         report_path = resolve_path(cfg["output"]["results_dir"]) / "tool_policy_report.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        manager.mark_complete(report=str(report_path), adapter_dir=str(out_dir))
-        console(f"Saved adapter: {out_dir}")
-        console(f"Saved report: {report_path}")
+        manager.mark_complete(report=str(manager.paths.artifacts / "training_report.json"), adapter_dir=str(out_dir))
+        console(f"COPY RESULTS DIRECTORY: {manager.paths.artifacts}")
     except BaseException as exc:
         manager.handle_exception(exc)
         raise
