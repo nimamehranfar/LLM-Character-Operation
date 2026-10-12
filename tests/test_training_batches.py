@@ -14,6 +14,26 @@ from src.training.engine import train_single_gpu
 from src.training.recovery import GracefulStop, RecoveryManager
 
 
+@pytest.mark.parametrize("limit", [0, 40960])
+def test_vram_limit_uses_current_device_and_zero_skips_cap(monkeypatch, limit):
+    from scripts import train_tool_policy as trainer
+
+    calls = []
+    monkeypatch.setattr(trainer, "select_device", lambda **kwargs: torch.device("cuda"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    def properties(device):
+        assert device == 0
+        return SimpleNamespace(total_memory=80 * 1024**3, name="mock GPU")
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+    monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction",
+                        lambda fraction, device: calls.append((fraction, device)))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    trainer.configure_vram_limit(limit)
+    assert calls == ([(0.5, 0)] if limit else [])
+
+
 def test_batch_plan_distinguishes_microbatch_and_effective_batch():
     plan = resolve_batch_plan(per_device_batch_size=8, gradient_accumulation_steps=1,
                               world_size=1, global_batch_size=1024)

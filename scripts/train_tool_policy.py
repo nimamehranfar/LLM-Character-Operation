@@ -80,12 +80,14 @@ def configure_vram_limit(max_vram_mib: int) -> None:
     device = select_device(announce=True)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    props = torch.cuda.get_device_properties(device)
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_index)
     total_mib = props.total_memory / 1024**2
     if max_vram_mib < 0:
         raise ValueError("max-vram-mib must be nonnegative; 0 uses the whole visible GPU")
     fraction = min(1.0, max_vram_mib / total_mib) if max_vram_mib else 1.0
-    torch.cuda.set_per_process_memory_fraction(fraction, device=device)
+    if max_vram_mib:
+        torch.cuda.set_per_process_memory_fraction(fraction, device=device_index)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     console(f"GPU: {props.name}; physical={total_mib:.1f} MiB; PyTorch ceiling={fraction * total_mib:.1f} MiB")
