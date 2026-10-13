@@ -25,6 +25,8 @@ def resolve(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=["1", "2", "both"], default="both")
+    parser.add_argument("--train-gpus", type=int, choices=[1, 2], default=1,
+                        help="One GPU, or two torchrun workers on one SLURM node")
     parser.add_argument("--phase1-config", default="configs/experiments/qwen3_8b/tool_policy_final.toml")
     parser.add_argument("--phase2-config", default="configs/experiments/qwen3_8b/result_injection_final.toml")
     parser.add_argument("--batch-size", type=int, help="Override micro-batch for each selected stage")
@@ -46,6 +48,7 @@ def main():
     started = time.perf_counter()
     print(f"RUN RESULTS DIRECTORY: {bundle}", flush=True)
     manifest = {"run_id": run_id, "arguments": vars(args), "status": "running", "stages": {}}
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     common = ["--max-vram-mib", str(args.max_vram_mib),
               "--auto-download" if args.auto_download else "--no-auto-download"]
     for option in ("batch_size", "global_batch_size", "gradient_accumulation_steps", "eval_batch_size", "seed", "model_cache_dir"):
@@ -64,7 +67,9 @@ def main():
             config_name, script, report_name, weight_key = stage_specs[stage]
             config_path = resolve(config_name)
             cfg = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            subprocess.run([sys.executable, str(ROOT / "scripts" / script), "--config", str(config_path), *common],
+            launcher = ([sys.executable, "-m", "torch.distributed.run", "--standalone",
+                         "--nnodes=1", "--nproc_per_node=2"] if args.train_gpus == 2 else [sys.executable])
+            subprocess.run([*launcher, str(ROOT / "scripts" / script), "--config", str(config_path), *common],
                            cwd=ROOT, check=True)
             report = json.loads((resolve(cfg["output"]["results_dir"]) / report_name).read_text(encoding="utf-8"))
             if report.get("status") != "complete":
@@ -86,6 +91,7 @@ def main():
             exported_config.write_text(text, encoding="utf-8")
             exported_configs[stage] = exported_config
             manifest["stages"][stage] = {"artifacts": str(destination), "checkpoint": str(weights)}
+            (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         if args.stage == "both" and args.evaluate_pipeline:
             pipeline_args = [sys.executable, str(ROOT / "scripts/evaluate_pipeline.py"),
                              "--phase1-config", str(exported_configs["1"]), "--phase2-config", str(exported_configs["2"]),

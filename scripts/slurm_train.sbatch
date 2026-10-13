@@ -16,5 +16,6 @@ if [[ ! -x .venv/bin/python ]]; then
     exit 1
 fi
 export PYTHONUNBUFFERED=1
-# Keep SLURM's CUDA_VISIBLE_DEVICES assignment intact. Each trainer uses cuda:0.
+# Keep SLURM's CUDA_VISIBLE_DEVICES assignment intact. --train-gpus 2 launches
+# two local torchrun workers, each using its own visible CUDA ordinal.
 srun .venv/bin/python scripts/run_final_training.py "$@"

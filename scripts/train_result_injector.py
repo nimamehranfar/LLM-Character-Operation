@@ -108,7 +108,8 @@ def main() -> None:
     from src.training.result_injection_data import prepare_training_batch
     from src.training.recovery import atomic_torch_save
 
-    ap = argparse.ArgumentParser(description="Train the multi-layer symbolic result injector on one GPU.")
+    from src.training.distributed import initialize, finish, create_manager
+    ap = argparse.ArgumentParser(description="Train the multi-layer symbolic result injector on one or two GPUs.")
     ap.add_argument("--config", default=str(REPO_ROOT / "configs/experiments/qwen3_8b/result_injection.toml"))
     ap.add_argument("--auto-download", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--model-cache-dir", default=None)
@@ -123,13 +124,14 @@ def main() -> None:
     apply_training_arguments(cfg, args)
     if args.max_vram_mib is not None:
         cfg["training"]["max_vram_mib"] = args.max_vram_mib
+    rank, world = initialize()
     seed = int(cfg["training"]["seed"])
     set_seed(seed)
     root = resolve_path(cfg["output"]["checkpoint_dir"])
     if args.status:
         RecoveryManager.print_status(checkpoint_root=root, config=cfg, script_version=SCRIPT_VERSION)
         return
-    manager = RecoveryManager.create_or_resume(
+    manager = create_manager(
         checkpoint_root=root, config=cfg, config_path=str(cfg_path), script_version=SCRIPT_VERSION,
         heartbeat_seconds=float(cfg["recovery"]["heartbeat_seconds"]), fresh=bool(args.fresh),
         explicit_run_dir=Path(args.run_dir).resolve() if args.run_dir else None,
@@ -225,12 +227,25 @@ def main() -> None:
             module=mapper, optimizer=optimizer, manager=manager, cfg=cfg, rows=train, lengths=lengths,
             prepare=prepare, forward=forward, evaluate=validate, state_cpu=lambda: state_cpu(mapper),
             restore=mapper.load_state_dict, checkpoint_prefix="phase2_layered", latest=latest, metric_key="best_accuracy")
+        finish()
+        if rank != 0:
+            return
         mapper.eval()
         final_started = time.perf_counter()
-        dev_layerwise = layerwise_eval(model, tokenizer, mapper, dev, executor, layers, cfg, save_per_example=True)
-        selected_layer = select_layer(dev_layerwise)
-        test_layerwise = layerwise_eval(model, tokenizer, mapper, test, executor, layers, cfg, save_per_example=True)
-        heldout_layerwise = layerwise_eval(model, tokenizer, mapper, heldout, executor, layers, cfg, save_per_example=True)
+        if cfg["evaluation"].get("run_layerwise_analysis", True):
+            dev_layerwise = layerwise_eval(model, tokenizer, mapper, dev, executor, layers, cfg, save_per_example=True)
+            selected_layer = select_layer(dev_layerwise)
+            final_layers = layers
+        else:
+            # Selection was made using dev only during training. Evaluate the
+            # chosen layer on each full split; a sweep over test/heldout cannot
+            # be used to select a layer and is prohibitively costly at 150k.
+            selected_layer = int(trained["best"]["metrics"]["selected_layer"])
+            final_layers = [selected_layer]
+            dev_layerwise = layerwise_eval(model, tokenizer, mapper, dev, executor,
+                                           final_layers, cfg, save_per_example=True)
+        test_layerwise = layerwise_eval(model, tokenizer, mapper, test, executor, final_layers, cfg, save_per_example=True)
+        heldout_layerwise = layerwise_eval(model, tokenizer, mapper, heldout, executor, final_layers, cfg, save_per_example=True)
 
         def baseline(rows):
             return evaluate_oracle_generation(
@@ -271,8 +286,8 @@ def main() -> None:
             "heldout_layerwise_oracle_phase1": heldout_layerwise,
             "selected_dev_oracle_phase1": selected(dev_layerwise), "selected_test_oracle_phase1": selected(test_layerwise),
             "selected_heldout_oracle_phase1": selected(heldout_layerwise),
-            "oracle_best_any_layer_test": summarize_best_any_layer(test_layerwise),
-            "oracle_best_any_layer_heldout": summarize_best_any_layer(heldout_layerwise),
+            "oracle_best_any_layer_test": summarize_best_any_layer(test_layerwise) if len(final_layers) > 1 else None,
+            "oracle_best_any_layer_heldout": summarize_best_any_layer(heldout_layerwise) if len(final_layers) > 1 else None,
             "runtime": {"resolve_download_and_model_loading_seconds": loading_seconds,
                         **model.training_setup_timing,
                         "batch_preparation_seconds": trained["batch_preparation_seconds"],
@@ -283,6 +298,7 @@ def main() -> None:
                         "wall_total_seconds_including_interruptions": manager.wall_elapsed_seconds(),
                         "peak_allocated_vram_mib": max(trained["peak_allocated_vram_mib"], torch.cuda.max_memory_allocated() / 1024**2),
                         "peak_reserved_vram_mib": max(trained["peak_reserved_vram_mib"], torch.cuda.max_memory_reserved() / 1024**2)},
+            "per_gpu_training_peak_vram_mib": trained["per_gpu_training_peak_vram_mib"],
             "final_checkpoint": str(immutable_checkpoint), "compatibility_checkpoint": str(final_path),
             "note": "All mapper evaluations here use oracle executor results to isolate reintegration. "
                     "End-to-end evaluation must separately use the trained policy's predicted calls.",
@@ -296,10 +312,12 @@ def main() -> None:
         print(f"Selected layer from dev only: {selected_layer}")
         print(f"COPY RESULTS DIRECTORY: {manager.paths.artifacts}")
     except BaseException as exc:
-        manager.handle_exception(exc)
+        if rank == 0:
+            manager.handle_exception(exc)
         raise
     finally:
         manager.close()
+        finish()
 
 
 if __name__ == "__main__":

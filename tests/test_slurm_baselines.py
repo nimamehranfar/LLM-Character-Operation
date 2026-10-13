@@ -19,7 +19,7 @@ def test_single_slurm_gpu_uses_visible_cuda_and_preserves_assignment(monkeypatch
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda index: "H100" if index == 0 else pytest.fail("Wrong GPU"))
     device = select_device(announce=True)
-    assert device == torch.device("cuda")
+    assert device == torch.device("cuda:0")
     output = capsys.readouterr().out
     assert "cuda:0 | GPU: H100" in output
     assert "SLURM_JOB_ID=42" in output and "GPU-assigned-by-slurm" in output

@@ -114,7 +114,9 @@ def test_vram_override_uses_whole_gpu_and_keeps_laptop_default(monkeypatch):
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
     configure_vram_limit(7600)
     configure_vram_limit(0)
-    assert fractions == [7600/(80*1024), 1.0]
+    # A zero ceiling leaves the whole GPU available without installing a
+    # PyTorch per-process cap.
+    assert fractions == [7600/(80*1024)]
     with pytest.raises(ValueError):
         configure_vram_limit(-1)
 

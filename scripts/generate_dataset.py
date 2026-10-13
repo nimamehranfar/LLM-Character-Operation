@@ -24,6 +24,7 @@ POSITIVE_FRACTION = 0.63
 SOURCE_FRACTIONS = {"real_word": 0.30, "augmented_word": 0.50, "random_generated": 0.20}
 CWUM_STYLE_FRACTION = 0.30  # layered on top; native project style remains the majority
 SEED = 20260919
+HARDER_SENTENCE_FRACTION = 0.0
 PRINTABLE = string.ascii_letters + string.digits + "!#$%&()*+,-./:;<=>?@[]^_{}~"
 
 # Sentence-scoped operations corresponding to CWUM English task families.
@@ -111,7 +112,19 @@ def one_token(source: str, words: list[str], rng: random.Random) -> str:
     return random_token(rng)
 
 
-def sentence(source: str, words: list[str], rng: random.Random) -> str:
+def sentence(source: str, words: list[str], rng: random.Random, split: str = "train") -> str:
+    if rng.random() < HARDER_SENTENCE_FRACTION:
+        roles = ("analyst", "clerk", "driver", "editor", "student", "visitor")
+        objects = ("ledger", "parcel", "report", "sample", "letter", "map")
+        places = ("station", "library", "market", "office", "museum", "harbor")
+        role, other = rng.sample(roles, 2)
+        obj, place = rng.choice(objects), rng.choice(places)
+        modifier = one_token(source, words, rng)
+        if split == "heldout":
+            return (f"Although the {place} was quiet, the {role} kept the {modifier} {obj} "
+                    f"beside the door; later, the {other} moved it again.")
+        return (f"Before the {place} opened, the {role} placed the {modifier} {obj} "
+                f"on a table, and the {other} checked it twice.")
     n = rng.randint(3, 10)
     if source == "real_word":
         return " ".join(rng.choice(words) for _ in range(n))
@@ -140,8 +153,8 @@ def insertion_text(source: str, words: list[str], rng: random.Random, *, words_o
     return one_token(source, words, rng)[: rng.randint(1, 5)]
 
 
-def make_args(op: str, source: str, words: list[str], rng: random.Random) -> dict[str, Any]:
-    text = sentence(source, words, rng) if op in SENTENCE_OPS else one_token(source, words, rng)
+def make_args(op: str, source: str, words: list[str], rng: random.Random, split: str = "train") -> dict[str, Any]:
+    text = sentence(source, words, rng, split) if op in SENTENCE_OPS else one_token(source, words, rng)
     args: dict[str, Any] = {"text": text}
     if op in {"COUNT_CHAR", "FIND_CHAR"}:
         args["character"] = choose_char(text, rng)
@@ -264,7 +277,7 @@ def render_template(template: str, args: dict[str, Any], rng: random.Random) -> 
 def make_positive(op: str, source: str, split: str, style: str, words: list[str], rng: random.Random, used: set[str], serial: int) -> dict[str, Any]:
     executor = CharacterExecutor()
     for _ in range(5000):
-        args = make_args(op, source, words, rng)
+        args = make_args(op, source, words, rng, split)
         if split == "heldout":
             template = rng.choice(HELDOUT_TEMPLATES[op])
             prompt = rng.choice(HELDOUT_PREFIX) + render_template(template, args, rng) + rng.choice(HELDOUT_SUFFIX)
@@ -382,7 +395,7 @@ def make_negative(split: str, words: list[str], rng: random.Random, used: set[st
     for _ in range(5000):
         if rng.random() < 0.70:
             # Use both single-token and sentence material to create semantic-neighbor negatives.
-            raw = sentence(rng.choice(tuple(SOURCE_FRACTIONS)), words, rng) if rng.random() < 0.35 else one_token(rng.choice(tuple(SOURCE_FRACTIONS)), words, rng)
+            raw = sentence(rng.choice(tuple(SOURCE_FRACTIONS)), words, rng, split) if rng.random() < 0.35 else one_token(rng.choice(tuple(SOURCE_FRACTIONS)), words, rng)
             category, prompt = hard_negative(raw, split, rng)
             family = "heldout_hard_negative" if split == "heldout" else "hard_negative"
         else:
@@ -455,18 +468,20 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def manifest_for(all_rows: dict[str, list[dict[str, Any]]], seed: int) -> dict[str, Any]:
+def manifest_for(all_rows: dict[str, list[dict[str, Any]]], seed: int, dataset_name: str) -> dict[str, Any]:
     flat = [r for rows in all_rows.values() for r in rows]
     prompts = [r["prompt"] for r in flat]
     train_families = {r["template_family"] for r in all_rows["train"]}
     held_families = {r["template_family"] for r in all_rows["heldout"]}
     return {
-        "dataset": "character_operations_50k",
+        "dataset": dataset_name,
         "seed": seed,
         "total": len(flat),
         "split_counts": {k: len(v) for k, v in all_rows.items()},
         "negative_count": sum(r["operation"] == "NONE" for r in flat),
         "negative_fraction": sum(r["operation"] == "NONE" for r in flat) / len(flat),
+        "harder_sentence_fraction_setting": HARDER_SENTENCE_FRACTION,
+        "long_positive_text_count": sum(r["operation"] != "NONE" and r["length_regime"] == "long" for r in flat),
         "positive_count": sum(r["operation"] != "NONE" for r in flat),
         "positive_source_counts": dict(Counter(r["source_style"] for r in flat if r["operation"] != "NONE")),
         "operation_counts": dict(Counter(r["operation"] for r in flat if r["operation"] != "NONE")),
@@ -484,21 +499,31 @@ def manifest_for(all_rows: dict[str, list[dict[str, Any]]], seed: int) -> dict[s
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", default="data/character_operations_50k")
+    ap.add_argument("--scale", type=int, default=1,
+                    help="Multiply every split count; --scale 3 yields 105k/15k/15k/15k")
+    ap.add_argument("--harder-sentences", action="store_true",
+                    help="Add independently written, longer sentence contexts to every split")
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--words", default="data/resources/faker_en_words.txt")
     args = ap.parse_args()
+    if args.scale < 1:
+        ap.error("--scale must be positive")
+    if args.scale != 1 and args.output_dir == "data/character_operations_50k":
+        ap.error("Choose a new --output-dir for a scaled dataset so the 50k release stays intact")
+    global HARDER_SENTENCE_FRACTION
+    HARDER_SENTENCE_FRACTION = 0.25 if args.harder_sentences else 0.0
     rng = random.Random(args.seed)
     words = load_words(REPO_ROOT / args.words)
     used: set[str] = set()
     all_rows: dict[str, list[dict[str, Any]]] = {}
     for offset, (split, total) in enumerate(SPLIT_COUNTS.items()):
-        all_rows[split] = build_split(split, total, words, rng, used, op_offset=offset * 3)
+        all_rows[split] = build_split(split, total * args.scale, words, rng, used, op_offset=offset * 3)
 
     out_dir = REPO_ROOT / args.output_dir
     filenames = {"train": "train.jsonl", "dev": "dev.jsonl", "test": "test.jsonl", "heldout": "heldout.jsonl"}
     for split, filename in filenames.items():
         write_jsonl(out_dir / filename, all_rows[split])
-    manifest = manifest_for(all_rows, args.seed)
+    manifest = manifest_for(all_rows, args.seed, out_dir.name)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2))
 

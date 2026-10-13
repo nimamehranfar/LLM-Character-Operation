@@ -131,7 +131,10 @@ def capture_rng_state(extra_rng_state: Any = None) -> dict[str, Any]:
         "extra_random": extra_rng_state,
     }
     if torch.cuda.is_available():
-        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        if os.environ.get("LOCAL_RANK") is not None:
+            state["torch_cuda_current_device"] = torch.cuda.get_rng_state(torch.cuda.current_device())
+        else:
+            state["torch_cuda"] = torch.cuda.get_rng_state_all()
     return state
 
 
@@ -145,6 +148,8 @@ def restore_rng_state(state: dict[str, Any], *, extra_rng: Any = None) -> None:
         torch.set_rng_state(state["torch_cpu"])
     if torch.cuda.is_available() and state.get("torch_cuda") is not None:
         torch.cuda.set_rng_state_all(state["torch_cuda"])
+    if torch.cuda.is_available() and state.get("torch_cuda_current_device") is not None:
+        torch.cuda.set_rng_state(state["torch_cuda_current_device"], torch.cuda.current_device())
     if extra_rng is not None and state.get("extra_random") is not None:
         extra_rng.setstate(state["extra_random"])
 

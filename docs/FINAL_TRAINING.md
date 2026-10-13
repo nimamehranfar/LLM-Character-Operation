@@ -1,4 +1,105 @@
-# Final training on one GPU
+# Final training and the separate 150k two-GPU protocol
+
+## New 150k data and two-H100 training
+
+The new `character_operations_150k` release contains 105,000 train, 15,000 dev,
+15,000 test, and 15,000 heldout examples. It keeps the original 70/10/10/10
+split and 37% no-call controls. All 150,000 prompts and IDs are unique, and
+the executor reproduces every positive target. The generator adds original
+longer sentence contexts to 25% of sentence samples; no benchmark test items
+or internet text were copied. The original 50k files and presets stay intact.
+After pulling the code, the dataset is included in Git. To regenerate it:
+
+```bash
+python scripts/generate_dataset.py --scale 3 --harder-sentences \
+  --output-dir data/character_operations_150k
+```
+
+The 150k presets use a **global** batch of 2,048 over two GPUs. Stage 1 uses
+microbatch 4 per GPU and 256 accumulation steps; stage 2 uses microbatch 8
+and 128 accumulation steps. Neither stage places 2,048 examples in GPU memory
+at once. Stage 1 uses three epochs. Stage 2 evaluates eight candidate layers
+on a deterministic 2,000-example development subset during training, then
+evaluates the selected layer on the full dev, test, and heldout splits. The
+test and heldout splits never select a layer. This protocol differs from the
+earlier 50k run and its accuracies should be reported separately.
+Stage 2 still accepts only seven scalar-result operations: its eligible counts
+are 38,589 train, 5,512 dev, 5,511 test, and 5,513 heldout. Stage 1 uses
+the complete 105,000-example training split.
+
+Submit stage 1 first. The AI partition has a seven-hour limit, so use
+`06:45:00` and repeat the same command if the job stops before completion;
+the recovery checkpoints use a separate 150k directory and resume with the
+same settings. Check the log and the checkpoint directory before submitting
+stage 2. The full two-GPU H100 model path is not verified locally.
+
+```bash
+cd ~/Projects/LLM-Character-Operation
+git pull --ff-only
+source .venv/bin/activate
+mkdir -p logs
+python - <<'PY'
+import json
+from pathlib import Path
+m = json.loads(Path('data/character_operations_150k/manifest.json').read_text())
+assert m['split_counts'] == {'train': 105000, 'dev': 15000, 'test': 15000, 'heldout': 15000}
+assert m['exact_prompt_duplicates'] == 0
+print(m['split_counts'], m['sha256_prompts'])
+PY
+sbatch --account=ric_g.ai.a._430 --partition=aiq \
+  --qos=ric_g.ai.a._430_aiq_qos --nodes=1 --gres=gpu:h100:2 \
+  --cpus-per-task=4 --mem=16G --time=00:10:00 \
+  --job-name=two-gpu-preflight --output=logs/%x-%j.out \
+  --wrap='srun .venv/bin/python -m torch.distributed.run --standalone --nproc_per_node=2 scripts/check_two_gpu_training.py'
+```
+
+Check that the short preflight log says `Two-GPU NCCL preflight passed`, then
+submit stage 1:
+
+```bash
+sbatch --account=ric_g.ai.a._430 --partition=aiq \
+  --qos=ric_g.ai.a._430_aiq_qos --nodes=1 --gres=gpu:h100:2 \
+  --cpus-per-task=16 --mem=128G --time=06:45:00 \
+  scripts/slurm_train.sbatch --stage 1 --train-gpus 2 \
+  --phase1-config configs/experiments/qwen3_8b/tool_policy_150k.toml \
+  --global-batch-size 2048 --auto-download
+```
+
+When stage 1 has a complete report, submit stage 2 in a separate job:
+
+```bash
+sbatch --account=ric_g.ai.a._430 --partition=aiq \
+  --qos=ric_g.ai.a._430_aiq_qos --nodes=1 --gres=gpu:h100:2 \
+  --cpus-per-task=16 --mem=128G --time=06:45:00 \
+  scripts/slurm_train.sbatch --stage 2 --train-gpus 2 \
+  --phase2-config configs/experiments/qwen3_8b/result_injection_150k.toml \
+  --global-batch-size 2048 --auto-download
+```
+
+After both stages have complete reports and exported weights, measure the
+actual predicted-call pipeline in another job. This evaluation is distinct
+from stage 2's oracle-result measurement:
+
+```bash
+sbatch --account=ric_g.ai.a._430 --partition=aiq \
+  --qos=ric_g.ai.a._430_aiq_qos --nodes=1 --gres=gpu:h100:1 \
+  --cpus-per-task=8 --mem=64G --time=06:45:00 \
+  --job-name=character-pipeline --output=logs/%x-%j.out \
+  --wrap='srun .venv/bin/python -u scripts/evaluate_pipeline.py \
+    --phase1-config configs/experiments/qwen3_8b/tool_policy_150k.toml \
+    --phase2-config configs/experiments/qwen3_8b/result_injection_150k.toml \
+    --split both --auto-download \
+    --results-dir results/pipeline_150k/${SLURM_JOB_ID} --resume'
+```
+
+`--train-gpus 2` launches two workers, each bound to one visible GPU. The
+effective batch and world size are saved immediately in
+`artifacts/effective_training_plan.json`, even if a later wall-time limit
+interrupts the run. One process owns recovery and result writes. Actual
+speed, VRAM fit, and end-to-end accuracy require the H100 run; the 150k data
+and 2,048 effective batch are new experiments, not validated improvements.
+
+## Earlier one-GPU protocol
 
 Both stages now support actual padded batches, gradient accumulation, and an explicit effective batch. The SLURM launcher requests one GPU and preserves the scheduler's `CUDA_VISIBLE_DEVICES` allocation. The script prints the device and GPU model. These commands do not pool multiple GPUs.
 
@@ -35,7 +136,7 @@ sbatch \
   --gres=gpu:1 \
   --cpus-per-task=8 \
   --mem=128G \
-  --time=24:00:00 \
+  --time=06:45:00 \
   scripts/slurm_train.sbatch \
   --stage both \
   --auto-download
@@ -83,7 +184,7 @@ sbatch \
   --account=ric_g.ai.a._430 \
   --partition=aiq \
   --qos=ric_g.ai.a._430_aiq_qos \
-  --gres=gpu:1 --cpus-per-task=8 --mem=128G --time=24:00:00 \
+  --gres=gpu:1 --cpus-per-task=8 --mem=128G --time=06:45:00 \
   scripts/slurm_train.sbatch \
   --stage 1 --batch-size 4 --global-batch-size 1024 --auto-download
 ```

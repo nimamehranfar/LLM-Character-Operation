@@ -36,6 +36,7 @@ from src.model.local_model import ensure_local_model_path
 from src.model.device import select_device
 from src.training.batching import pad_training_sequences
 from src.training.engine import add_training_arguments, apply_training_arguments, train_single_gpu
+from src.training.distributed import initialize, finish, create_manager
 from src.training.reporting import export_training_artifacts, run_manifest
 from src.training.low_vram_qlora import prepare_4bit_lora_base_low_vram
 from src.training.recovery import (
@@ -286,7 +287,7 @@ def evaluate_policy(model, tokenizer, examples, cfg: dict[str, Any], *, seed: in
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the structured character-operation tool policy on one GPU.")
+    parser = argparse.ArgumentParser(description="Train the structured character-operation tool policy on one or two GPUs.")
     parser.add_argument("--config", default=str(REPO_ROOT / "configs/experiments/qwen3_8b/tool_policy.toml"))
     parser.add_argument("--auto-download", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--model-cache-dir", default=None)
@@ -301,13 +302,14 @@ def main() -> None:
     apply_training_arguments(cfg, args)
     if args.max_vram_mib is not None:
         cfg["training"]["max_vram_mib"] = args.max_vram_mib
+    rank, world = initialize()
     seed = int(cfg["training"]["seed"])
     set_seed(seed)
     checkpoint_root = resolve_path(cfg["output"]["checkpoint_dir"])
     if args.status:
         RecoveryManager.print_status(checkpoint_root=checkpoint_root, config=cfg, script_version=SCRIPT_VERSION)
         return
-    manager = RecoveryManager.create_or_resume(
+    manager = create_manager(
         checkpoint_root=checkpoint_root, config=cfg, config_path=str(cfg_path), script_version=SCRIPT_VERSION,
         heartbeat_seconds=float(cfg["recovery"]["heartbeat_seconds"]), fresh=bool(args.fresh),
         explicit_run_dir=Path(args.run_dir).resolve() if args.run_dir else None,
@@ -381,14 +383,17 @@ def main() -> None:
                                                  device=torch.device("cpu"))[0]
             metrics["loss"] = teacher_forced_loss(model, dev_batches(), model.device)
             model.train(was_training)
-            current_epoch[0] += 1
             return metrics
 
         trained = train_single_gpu(
             module=model, optimizer=optimizer, manager=manager, cfg=cfg, rows=train_rows, lengths=lengths,
             prepare=prepare, forward=forward, evaluate=validate, state_cpu=lambda: adapter_state_cpu(model),
             restore=lambda state: set_peft_model_state_dict(model, state),
-            checkpoint_prefix="policy", latest=latest, metric_key="full_call_exact_accuracy")
+            checkpoint_prefix="policy", latest=latest, metric_key="full_call_exact_accuracy",
+            set_epoch=lambda epoch: current_epoch.__setitem__(0, epoch))
+        finish()
+        if rank != 0:
+            return
         final_started = time.perf_counter()
         final_metrics = {}
         for split, path in (("test", test_path), ("heldout", heldout_path)):
@@ -426,6 +431,7 @@ def main() -> None:
                         "wall_total_seconds_including_interruptions": manager.wall_elapsed_seconds(),
                         "peak_allocated_vram_mib": max(trained["peak_allocated_vram_mib"], torch.cuda.max_memory_allocated() / 1024**2),
                         "peak_reserved_vram_mib": max(trained["peak_reserved_vram_mib"], torch.cuda.max_memory_reserved() / 1024**2)},
+            "per_gpu_training_peak_vram_mib": trained["per_gpu_training_peak_vram_mib"],
             "adapter_dir": str(out_dir), "compatibility_adapter_dir": str(compatibility),
             "recovery_run_dir": str(manager.paths.run_dir), "phase2_trained": False,
         }
@@ -437,10 +443,12 @@ def main() -> None:
         manager.mark_complete(report=str(manager.paths.artifacts / "training_report.json"), adapter_dir=str(out_dir))
         console(f"COPY RESULTS DIRECTORY: {manager.paths.artifacts}")
     except BaseException as exc:
-        manager.handle_exception(exc)
+        if rank == 0:
+            manager.handle_exception(exc)
         raise
     finally:
         manager.close()
+        finish()
 
 
 if __name__ == "__main__":

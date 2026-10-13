@@ -9,10 +9,17 @@ import torch
 def select_device(*, announce: bool = False) -> torch.device:
     # Do not interpret physical GPU IDs or change CUDA_VISIBLE_DEVICES. A single
     # GPU allocated by SLURM is CUDA's sole visible device, at ordinal zero.
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        index = int(os.environ.get("LOCAL_RANK", torch.cuda.current_device()))
+        if index >= torch.cuda.device_count():
+            raise RuntimeError(f"LOCAL_RANK={index} exceeds the visible CUDA device count")
+        torch.cuda.set_device(index)
+        device = torch.device("cuda", index)
+    else:
+        device = torch.device("cpu")
     if announce:
         if device.type == "cuda":
-            index = torch.cuda.current_device()
+            index = device.index
             description = f"cuda:{index} | GPU: {torch.cuda.get_device_name(index)}"
         else:
             description = "cpu | GPU: none"
