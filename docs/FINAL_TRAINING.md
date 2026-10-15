@@ -1,5 +1,43 @@
 # Final training and the separate 150k two-GPU protocol
 
+## Simultaneous batch size and automatic VRAM capacity search
+
+`--batch-size N` means **N sequences simultaneously per GPU**. Supplying it
+now disables the config's implicit gradient accumulation unless you explicitly
+also request `--gradient-accumulation-steps` or `--global-batch-size`.
+`--global-batch-size` continues to mean effective examples per optimizer update.
+Existing configurations without these overrides retain their original settings.
+
+For a new run that uses the largest tested simultaneous batch, use:
+
+```bash
+sbatch --account=ric_g.ai.a._430 --partition=aiq \
+  --qos=ric_g.ai.a._430_aiq_qos --nodes=1 --gres=gpu:h100:2 \
+  --cpus-per-task=8 --mem=64G --time=06:45:00 \
+  scripts/slurm_train.sbatch --stage 1 --train-gpus 2 \
+  --phase1-config configs/experiments/qwen3_8b/tool_policy_150k.toml \
+  --auto-batch-size --vram-target 0.95 --auto-download --fresh
+```
+
+Do not combine auto mode with other batch flags. It probes forward/backward
+passes at the maximum measured training sequence length, uses exponential search and
+integer bisection, rejects a size if either GPU fails, and reserves optimizer
+headroom. The target is a per-GPU allocator budget, not a promise to occupy a
+constant percentage of device memory. Shorter actual batches use less memory.
+Stage 1 scans rendered lengths across all planned epochs before calibration.
+The largest passing size under the search ceiling (default 1024 per GPU) is
+selected; this capacity search does not measure the throughput optimum.
+No optimizer update occurs during probing, and RNG state is restored afterward.
+Accumulation is **one**. The effective batch is the selected per-GPU size times
+the GPU count; it may be lower than 2048.
+
+`batch_calibration.json` in the recovery run's `artifacts/` records every trial,
+per-GPU peak allocation, selection, target and calibration time.
+`effective_training_plan.json` records simultaneous and effective batch settings.
+The latest checkpoint retains the selected batch for resume. Repeat the same
+auto-mode command **without `--fresh`** to resume, keeping the same GPU count.
+Changing the batch protocol creates a separate experiment from earlier runs.
+
 ## New 150k data and two-H100 training
 
 The new `character_operations_150k` release contains 105,000 train, 15,000 dev,

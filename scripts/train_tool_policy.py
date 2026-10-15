@@ -350,7 +350,13 @@ def main() -> None:
             return encode_training_example(tokenizer, rendered, maximum,
                                            fail_on_truncation=bool(tr.get("fail_on_truncation", False)))
 
-        lengths = [encode(i, 1)[0].numel() for i in range(len(train_rows))]
+        # Auto mode budgets for the longest actual rendered input across every
+        # planned epoch, rather than wasting capacity on unused context length.
+        length_epochs = range(1, int(tr["epochs"]) + 1) if tr.get("auto_batch_size") else (1,)
+        if tr.get("auto_batch_size") and rank == 0:
+            console("Auto batch: measuring sequence lengths across all planned epochs")
+        lengths = [max(encode(i, epoch)[0].numel() for epoch in length_epochs)
+                   for i in range(len(train_rows))]
         # Rendering varies deterministically by epoch. The engine's epoch is
         # available through the recovery state updated at optimizer boundaries.
         current_epoch = [int(latest.get("loop", {}).get("epoch", 1)) if latest else 1]

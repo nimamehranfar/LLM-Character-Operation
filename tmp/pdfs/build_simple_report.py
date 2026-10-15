@@ -1,6 +1,6 @@
 from pathlib import Path
 BASE=Path(__file__).with_name('build_project_report.py').read_text(encoding='utf-8').split('# 1:')[0]
-exec(BASE.replace('LLM_Character_Operations_Project_Report.pdf','LLM_Character_Operations_Simple_Report.pdf'))
+exec(BASE.replace('LLM_Character_Operations_Project_Report.pdf','LLM_Character_Operations_Simple_Report.pdf').replace('14 October 2026','15 October 2026'))
 
 CWUM='https://aclanthology.org/2024.findings-emnlp.691/'
 CHAR='https://arxiv.org/html/2508.02591v1'
@@ -22,7 +22,8 @@ text('PROJECT REPORT',52,478,13,'#67D5CE',True)
 text('LLM Character',52,373,49,'#FFFFFF',True)
 text('Operations',52,310,49,'#FFFFFF',True)
 para('Understand the request.<br/>Compute exactly.<br/>Feed the result back.',54,249,520,26,'#D9E6F4')
-text('Report to Professor | 14 October 2026',54,57,13,'#96AFCB')
+text('Qwen3-8B backbone | approximately 8 billion parameters',54,90,15,'#67D5CE',True)
+text('Report to Professor | 15 October 2026',54,57,13,'#96AFCB')
 for kind,y,label in [('model',372,'Qwen + LoRA'),('tool',251,'Exact tools'),('model',130,'Result mapper')]:
     rect(627,y-16,280,87,'#203C55'); icon(kind,648,y+12,'#67D5CE',.85); text(label,704,y+20,20,'#FFFFFF',True)
 arrow(766,352,766,326,'#67D5CE'); arrow(766,232,766,205,'#67D5CE')
@@ -63,23 +64,25 @@ def flow(y,title,labels,colors):
         pill(x,y,190,label,col,16)
         if i<3:arrow(x+195,y+21,x+223,y+21,col)
 flow(312,'Ordinary tool feedback',['LLM tool call','Exact executor','Result as text','LLM answer'],[TEAL,TEAL,NAVY,TEAL])
-flow(203,'Our scalar-result route',['LoRA tool call','Exact executor','Hidden-state mapper','LLM answer'],[TEAL,TEAL,BLUE,TEAL])
-flow(94,'Our string-edit route',['LoRA tool call','Exact executor','Return edited text','Final output'],[TEAL,TEAL,NAVY,TEAL])
-text('Same exact tools. Different feedback interface. One call; no retry loop.',40,65,17,NAVY,True)
-text('We also compare the trained selector with text feedback to assess the mapper\'s contribution.',40,39,13,MUTED)
+flow(210,'Our scalar-result route',['LoRA tool call','Exact executor','Hidden-state mapper','LLM answer'],[TEAL,TEAL,BLUE,TEAL])
+rect(40,74,880,106,'#E9EFF9',6)
+text('Proposed novelty / contribution',58,153,18,BLUE,True)
+para('A learned, layer-specific gated mapper reintegrates exact numeric and single-character tool results into frozen Qwen3-8B, paired with a LoRA-trained selector.',58,133,841,17,NAVY)
+text('Current scope: edited strings return directly. Hidden-state feedback broadly has prior work.',40,54,13,MUTED)
+text('Matched text-feedback experiments must establish the mapper\'s benefit.',40,36,12,MUTED)
 c.showPage()
 
 # Page 6: published vs own measurements
-page(6,'Published results and our progress','Accuracy on each study\'s own benchmark; these rows are not a shared leaderboard.')
+page(6,'Small-model results and our progress','Our Qwen3-8B: ~8B parameters, about 9x smaller than 70-72B models. Different benchmarks below.')
 cols=[40,302,505,920]
 rect(40,342,880,39,NAVY,6)
 for x,s in zip(cols[:-1],['Study / system','Task / setting','Reported result']):text(s,x+12,356,16,'#FFFFFF',True)
 rows=[
- ('CWUM (2024) [1]','English task average','GPT-4: 66.64%'),
- ('CharBench (2025) [2]','Counting + indexing','GPT-4o: 70.73% overall'),
- ('Divide & Conquer (2025) [3]','Deletion / insertion / substitution','GPT-3.5: 94.8% / 89.8% / 93.7%'),
- ('Our initial LoRA + mapper','3 operations; final task answer','IID 99.62% (2334/2343); new wording 98.11% (883/900)'),
- ('Our newer LoRA selector','12 operations + controls; call exact','Test 99.88%; held-out 94.26% (4713/5000)'),
+ ('CWUM (2024) [1]','English task average','Llama-3-8B: 25.13%; 7B SFT model: 93.71%'),
+ ('CharBench (2025) [2]','Counting + indexing','Mistral-7B: 34.72% overall'),
+ ('Divide & Conquer (2025) [3]','Deletion / insertion / substitution','Llama-3-8B: 72.2% / 63.8% / 73.2%'),
+ ('Our initial Qwen3-8B + mapper','3 operations; final task answer','IID 99.62% (2334/2343); new wording 98.11% (883/900)'),
+ ('Our newer Qwen3-8B selector','12 operations + controls; call exact','Test 99.88%; held-out 94.26% (4713/5000)'),
  ('Current 12-operation pipeline','LoRA + multilayer-candidate mapper','Completed full-pipeline score not supplied'),
 ]
 for i,row in enumerate(rows):
@@ -87,8 +90,8 @@ for i,row in enumerate(rows):
     for j,s in enumerate(row):para(s,cols[j]+12,y+29,cols[j+1]-cols[j]-24,12,NAVY)
 para('Initial run: count character, string length, find character; reused V6 mapper at L5. Not the current 12-task protocol.',40,111,880,12)
 para('Initial overall success incl. controls: 99.78% (3991/4000) IID; 96.89% (1744/1800) new wording.',40,88,880,12)
-para('Initial scores verified from copied JSONs; newer selector scores transcribed from server logs.',40,66,880,11)
-link('[1] CWUM, Table 2',CWUM,40,39,10)
+para('Different tasks and training: not a direct ranking. Initial: copied JSONs; newer selector: reported server logs.',40,66,880,11)
+link('[1] CWUM, Tables 2 and 4',CWUM,40,39,10)
 link('[2] CharBench, Table 2',CHAR,280,39,10)
 link('[3] Divide & Conquer, Table 1',DAC,558,39,10)
 c.showPage(); c.save()
