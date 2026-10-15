@@ -19,9 +19,6 @@ from src.training.reporting import MetricJournal
 
 def add_training_arguments(parser) -> None:
     parser.add_argument("--batch-size", type=int, help="Simultaneous sequences PER GPU; accumulation defaults to 1 when supplied")
-    parser.add_argument("--auto-batch-size", action="store_true", help="Probe the largest simultaneous batch per GPU; accumulation=1")
-    parser.add_argument("--vram-target", type=float, default=0.90, help="Auto-batch fraction of each GPU's VRAM (default 0.90)")
-    parser.add_argument("--auto-batch-max-size", type=int, default=1024, help="Upper bound per GPU for auto-batch search")
     parser.add_argument("--global-batch-size", type=int, help="Effective sequences per optimizer update")
     parser.add_argument("--gradient-accumulation-steps", type=int)
     parser.add_argument("--eval-batch-size", type=int)
@@ -29,24 +26,14 @@ def add_training_arguments(parser) -> None:
 
 
 def apply_training_arguments(cfg, args) -> None:
-    auto = getattr(args, "auto_batch_size", False)
-    if auto and (args.batch_size is not None or args.global_batch_size is not None):
-        raise ValueError("Use --auto-batch-size alone, or explicit --batch-size/--global-batch-size")
-    if auto and args.gradient_accumulation_steps not in (None, 1):
-        raise ValueError("Auto batch uses accumulation=1; omit --gradient-accumulation-steps")
-    if auto:
-        if not 0.1 <= args.vram_target <= 0.95 or args.auto_batch_max_size < 1:
-            raise ValueError("vram-target must be in [0.1, 0.95] and auto-batch-max-size must be positive")
-        cfg["training"].update(auto_batch_size=True, vram_target=args.vram_target,
-                               auto_batch_max_size=args.auto_batch_max_size)
     for key, value in (("per_device_train_batch_size", args.batch_size),
                        ("global_batch_size", args.global_batch_size),
                        ("gradient_accumulation_steps", args.gradient_accumulation_steps), ("seed", args.seed)):
         if value is not None:
             cfg["training"][key] = value
-    if (auto or args.batch_size is not None or args.gradient_accumulation_steps is not None) and args.global_batch_size is None:
+    if (args.batch_size is not None or args.gradient_accumulation_steps is not None) and args.global_batch_size is None:
         cfg["training"].pop("global_batch_size", None)
-        if auto or args.gradient_accumulation_steps is None:
+        if args.gradient_accumulation_steps is None:
             cfg["training"]["gradient_accumulation_steps"] = 1
     if args.eval_batch_size is not None:
         cfg["evaluation"]["batch_size"] = args.eval_batch_size
@@ -78,22 +65,6 @@ def train_single_gpu(*, module, optimizer, manager, cfg, rows, lengths,
     tr = cfg["training"]
     rank = dist.get_rank() if dist.is_initialized() else 0
     world = dist.get_world_size() if dist.is_initialized() else 1
-    if tr.get("auto_batch_size"):
-        from src.training.autobatch import calibrate_batch_size
-        saved_plan = latest.get("batch_plan") if latest else None
-        if saved_plan:
-            if saved_plan["world_size"] != world:
-                raise ValueError("Resume requires the same GPU count as the calibrated checkpoint")
-            selected = saved_plan["per_device_batch_size"]
-            device = next(module.parameters()).device
-            total = torch.cuda.get_device_properties(device).total_memory
-            ceiling = min(float(tr["vram_target"]),
-                          float(tr.get("max_vram_mib") or total / 1024**2) * 1024**2 / total)
-            torch.cuda.set_per_process_memory_fraction(ceiling, device=device.index)
-        else:
-            selected = calibrate_batch_size(module=module, optimizer=optimizer, prepare=prepare,
-                                            forward=forward, lengths=lengths, cfg=cfg, manager=manager)
-        tr = dict(tr, per_device_train_batch_size=selected, gradient_accumulation_steps=1)
     plan = resolve_batch_plan(per_device_batch_size=int(tr.get("per_device_train_batch_size", 1)),
                               gradient_accumulation_steps=int(tr.get("gradient_accumulation_steps", 1)),
                               world_size=world, global_batch_size=tr.get("global_batch_size"))

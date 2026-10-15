@@ -30,9 +30,6 @@ def main():
     parser.add_argument("--phase1-config", default="configs/experiments/qwen3_8b/tool_policy_final.toml")
     parser.add_argument("--phase2-config", default="configs/experiments/qwen3_8b/result_injection_final.toml")
     parser.add_argument("--batch-size", type=int, help="Simultaneous sequences per GPU; accumulation defaults to 1")
-    parser.add_argument("--auto-batch-size", action="store_true", help="Find largest simultaneous batch per GPU, accumulation=1")
-    parser.add_argument("--vram-target", type=float, default=0.90)
-    parser.add_argument("--auto-batch-max-size", type=int, default=1024)
     parser.add_argument("--global-batch-size", type=int)
     parser.add_argument("--gradient-accumulation-steps", type=int)
     parser.add_argument("--eval-batch-size", type=int)
@@ -45,9 +42,6 @@ def main():
                         help="After both stages, evaluate actual predicted calls on test and heldout")
     parser.add_argument("--results-dir", default="results/final_training")
     args = parser.parse_args()
-    if args.auto_batch_size and (args.batch_size is not None or args.global_batch_size is not None
-                                 or args.gradient_accumulation_steps not in (None, 1)):
-        parser.error("--auto-batch-size selects the simultaneous batch with accumulation=1; omit other batch flags")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + os.environ.get("SLURM_JOB_ID", "local") + "_" + uuid.uuid4().hex[:8]
     bundle = resolve(args.results_dir) / run_id
     bundle.mkdir(parents=True)
@@ -63,9 +57,6 @@ def main():
             common.extend(["--" + option.replace("_", "-"), str(value)])
     if args.fresh:
         common.append("--fresh")
-    if args.auto_batch_size:
-        common.extend(["--auto-batch-size", "--vram-target", str(args.vram_target),
-                       "--auto-batch-max-size", str(args.auto_batch_max_size)])
     stage_specs = {
         "1": (args.phase1_config, "train_tool_policy.py", "tool_policy_report.json", "adapter_dir"),
         "2": (args.phase2_config, "train_result_injector.py", "result_injection_report.json", "final_checkpoint"),
